@@ -152,6 +152,7 @@ console.
 | `--pal` / `--ntsc` | Select the video standard for encoding or desktop preview. |
 | `--14` / `--16` | Select the PCM audio bit width. |
 | `--swap-fields` | Exchange the PCM image fields before cropping, for field-order diagnostics. |
+| `--display-stats` | Report image geometry and SDL presentation intervals in KMS Pi mode. |
 | `--no-dither` | Disable dithering when converting to 14-bit audio. |
 | `--no-parity` | Disable parity generation. |
 | `--no-q` | Disable Q generation in 14-bit mode. |

@@ -7,6 +7,8 @@ This exercises the encoder, not the physical composite output or Sony's decoder.
 import binascii
 import itertools
 import pathlib
+import functools
+import operator
 import random
 import struct
 import subprocess
@@ -26,6 +28,25 @@ def word(bits):
     result = 0
     for bit in bits:
         result = (result << 1) | bit
+    return result
+
+
+def q_parity(words):
+    # STC-007: T^6 L0 + T^5 R0 + ... + T R2 over GF(2).
+    # T is a left shift with feedback at bits 8 and 0 from bit 13.
+    # Independent reference: Fagear/SDVPCMdecoder's TP1_MATRIX and calcQcode:
+    # https://github.com/Fagear/SDVPCMdecoder/blob/main/stc007deinterleaver.cpp
+    result = 0
+    for value in words:
+        combined = result ^ value
+        result = ((combined << 1) & 0x3fff) ^ (0x101 if combined & 0x2000 else 0)
+    return result
+
+
+def unpack_word(row, column, depth):
+    result = row[column]
+    if depth == 16:
+        result = (result << 2) | ((row[7] >> ((6 - column) * 2)) & 3)
     return result
 
 
@@ -56,6 +77,7 @@ with tempfile.TemporaryDirectory(prefix="pcm-roundtrip-") as directory:
             assert len(pixels) % frame_size == 0
             frames = len(pixels) // frame_size
             rows = []
+            visible = []
             checked_crc = 0
             # Sample the middle of each bit cell after the video writer's
             # horizontal resize, independently of its interpolation filter.
@@ -75,6 +97,9 @@ with tempfile.TemporaryDirectory(prefix="pcm-roundtrip-") as directory:
                         checked_crc += 1
                         if line:
                             rows.append([word(bits[i:i + 14]) for i in range(0, 112, 14)])
+                            # Model the current KMS renderer at crop=0,
+                            # height_mod=0: rows below the screen are clipped.
+                            visible.append(y < (480 if standard == "ntsc" else 576))
 
             # Undo the 16-line delay between successive audio words. The last
             # sample column is delayed by 80 rows. Only verify groups for which
@@ -98,3 +123,29 @@ with tempfile.TemporaryDirectory(prefix="pcm-roundtrip-") as directory:
             print(f"PASS: {standard.upper()} {depth}-bit, swap={swapped}: {checked_crc} row CRCs; "
                   f"{groups * 3} stereo sample pairs recovered exactly "
                   "(EOF flushing not checked)")
+
+            parity_groups = min(len(rows) - 16 * 7, len(samples) // 6)
+            repaired_audio_words = 0
+            for group in range(parity_groups):
+                block = [unpack_word(rows[group + 16 * col], col, depth)
+                         for col in range(7)]
+                assert functools.reduce(operator.xor, block) == 0, (
+                    standard, depth, swapped, group, "P mismatch")
+                if depth == 14:
+                    assert q_parity(block[:6]) == rows[group + 16 * 7][7], (
+                        standard, swapped, group, "Q mismatch")
+
+                # Treat clipped scan lines as known erasures. This does not
+                # model the Sony's line synchronization or analogue bit errors.
+                missing = [col for col in range(7) if not visible[group + 16 * col]]
+                assert len(missing) <= 1, (standard, group, "P cannot repair this pattern")
+                if missing:
+                    bad = missing[0]
+                    recovered = functools.reduce(operator.xor,
+                        (value for col, value in enumerate(block) if col != bad))
+                    assert recovered == block[bad], (standard, depth, group, bad)
+                    repaired_audio_words += int(bad < 6)
+            assert repaired_audio_words > 0
+            print(f"PASS: {parity_groups} P{'/Q' if depth == 14 else ''} blocks; "
+                  f"{repaired_audio_words} clipped audio words recoverable with P "
+                  "(known erasures, ideal signal)")

@@ -44,8 +44,11 @@ python3 tests/pcm_roundtrip.py ./build/src/pcm_coder
 ```
 
 The round-trip check extracts bits from the generated video, checks every row's
-CRC, and recovers known audio samples in PAL/NTSC and 14/16-bit modes. It does
-not test the physical signal, error correction, or complete EOF flushing.
+CRC and the P/Q parity words, and recovers known audio samples in PAL/NTSC and
+14/16-bit modes. It also simulates P recovery of the rows clipped by the default
+KMS geometry, assuming their positions are known and all other bits are correct.
+It does not test the physical signal, the Sony's synchronization and correction
+behavior, or complete EOF flushing.
 
 To build only the file encoder, configure with `-DENABLE_PLAYER=OFF`.
 SDL2 and PortAudio development packages are then unnecessary. File encoding
@@ -138,6 +141,47 @@ display mode has 480 active rows. The default 525-row padded image therefore
 cannot fit without clipping; crop/offset changes alone do not establish correct
 PCM timing. Diagnose the mode, scan-line mapping, and frame presentation before
 continuing alignment experiments.
+
+There is also a horizontal timing mismatch with zero offsets in the reported
+NTSC mode (`13500 720 736 800 858 480 486 492 525`). The
+[original EIAJ format description, Figure 4](https://vidachestvo.ru/%D0%A1%D0%BB%D1%83%D0%B6%D0%B5%D0%B1%D0%BD%D0%B0%D1%8F%3ARedirect/file/Mitsubishi._A_PCM_Digital_Audio_Processor_for_Home_Use_VTR%27s.pdf)
+specifies 168 bit periods per horizontal line and data sync starting 26 bit
+periods after horizontal sync begins. With 858 pixel periods per line, the
+encoder's 139-cell image should span `139 * 858 / 168 = 709.893` pixels.
+Stretching it to 720 pixels makes it about 1.4% too wide.
+
+The mode places the start of active video 122 pixel periods after horizontal
+sync begins. The encoder's first sync pulse is one cell into its image, so
+the image origin should be `25 * 858 / 168 - 122 = 5.679` pixels. Rounded
+to whole pixels, `--left_offset 6 --right_offset 4` provides a 710-pixel
+image with that origin. This is a calculated horizontal alignment for this
+specific NTSC mode; it has not yet been confirmed to fix Sony playback.
+It does not correct the vertical alignment or frame presentation timing.
+
+In the software erasure model, P parity can recover the data lost to this
+default clipping pattern. Clipping alone therefore does not establish the
+cause of noise on the Sony: misplaced lines, additional bit errors, and frame
+timing still need investigation.
+
+To collect presentation timing measurements, run:
+
+```sh
+SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 SDL_VIDEO_DOUBLE_BUFFER=1 \
+  ./build/src/pcm_coder -R --14 --crop-top 0 --display-stats input.wav
+```
+
+Keep it running for at least 20 seconds and record the `KMS geometry` and
+`KMS timing` lines. The report shows SDL presentation-return frequency and
+the minimum/maximum gaps over each five-second window. `short` and `long`
+count intervals below 75% or above 125% of the target frame period, respectively.
+NTSC's target is about 33.367 ms per complete image; PAL's is 40 ms.
+This can reveal irregular pacing, but it does not measure the analogue field
+phase or prove that every submitted image was displayed correctly.
+
+`SDL_VIDEO_DOUBLE_BUFFER=1` makes the SDL KMS backend wait for completion of
+the submitted page flip before returning (after initial setup), so these
+measurements are more useful than with a pending flip. See the
+[SDL implementation](https://github.com/libsdl-org/SDL/blob/release-2.32.4/src/video/kmsdrm/SDL_kmsdrmopengles.c).
 
 For a controlled field-order comparison, repeat the same playback command with
 `--swap-fields` added:

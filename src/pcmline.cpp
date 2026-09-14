@@ -206,10 +206,11 @@ uint16_t PCMLine::QfromBinArray(
   return res;
 }
 
-std::array<uint8_t, PCMLine::TotalChanelSamplesWithP * PCMLine::BITS_PRE_COLUMN>
+std::array<uint8_t, PCMLine::TotalDataPreLine * PCMLine::BITS_PRE_COLUMN>
 PCMLine::toBinArray(const uint16_t data[]) const {
-  std::array<uint8_t,
-             PCMLine::TotalChanelSamplesWithP * PCMLine::BITS_PRE_COLUMN>
+  // GenerateQ reverses a complete eight-word DataBlock, including its Q slot,
+  // even though the Q calculation itself only uses the six audio words.
+  std::array<uint8_t, PCMLine::TotalDataPreLine * PCMLine::BITS_PRE_COLUMN>
       res;
 
   int bit = 0;

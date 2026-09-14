@@ -1,6 +1,8 @@
 #include "KMSDisplayConsumer.h"
 
 #include <memory>
+#include <algorithm>
+#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -14,8 +16,9 @@ void checkSDL(int result, const char *operation) {
 }
 
 KMSDisplayConsumer::KMSDisplayConsumer(int left_offset, int right_offset,
-                                     int height_mod)
-    : left_offset(left_offset), right_offset(right_offset), height_mod(height_mod) {}
+                                     int height_mod, bool display_stats)
+    : left_offset(left_offset), right_offset(right_offset), height_mod(height_mod),
+      display_stats(display_stats) {}
 
 void KMSDisplayConsumer::InitRenderer(int width, int height) {
   const char *driver = SDL_GetCurrentVideoDriver();
@@ -74,14 +77,48 @@ void KMSDisplayConsumer::renderFrame(const IFrame &frame) {
   }
   SDL_Rect dest{left_offset, 0, width - left_offset - right_offset,
                 static_cast<int>(dest_height)};
+  if (display_stats && !stats_started) {
+    const char *double_buffer = SDL_GetHint(SDL_HINT_VIDEO_DOUBLE_BUFFER);
+    std::fprintf(stderr, "\nKMS geometry: source=%dx%d, draw=%dx%d+%d+%d, screen=%dx%d; double-buffer hint=%s\n",
+        frame.width(), frame.heigth(), dest.w, dest.h, dest.x, dest.y,
+        width, heigth, double_buffer ? double_buffer : "unset");
+  }
   checkSDL(SDL_RenderClear(renderer), "SDL_RenderClear");
   checkSDL(SDL_RenderCopy(renderer, texture.get(), nullptr, &dest), "SDL_RenderCopy");
   std::this_thread::sleep_until(next_frame);
   SDL_RenderPresent(renderer);
   next_frame += frame_period;
   const auto now = std::chrono::steady_clock::now();
+  if (display_stats) {
+    reportPresent(now);
+  }
   // Do not burst frames when decoding falls behind the output clock.
   if (next_frame < now) {
     next_frame = now;
+  }
+}
+
+void KMSDisplayConsumer::reportPresent(std::chrono::steady_clock::time_point now) {
+  if (!stats_started) {
+    stats_start = previous_present = now;
+    stats_started = true;
+    return;
+  }
+  const double gap = std::chrono::duration<double, std::milli>(now - previous_present).count();
+  const double target = std::chrono::duration<double, std::milli>(frame_period).count();
+  previous_present = now;
+  ++intervals;
+  min_gap_ms = intervals == 1 ? gap : std::min(min_gap_ms, gap);
+  max_gap_ms = intervals == 1 ? gap : std::max(max_gap_ms, gap);
+  short_intervals += gap < target * 0.75;
+  long_intervals += gap > target * 1.25;
+  const double elapsed = std::chrono::duration<double>(now - stats_start).count();
+  if (elapsed >= 5.0) {
+    // These are SDL call-return times, not measured analogue field timestamps.
+    std::fprintf(stderr, "\nKMS timing: %.3f present returns/s; gap min=%.3f max=%.3f ms; target=%.3f ms; short=%u long=%u of %u\n",
+        intervals / elapsed, min_gap_ms, max_gap_ms, target,
+        short_intervals, long_intervals, intervals);
+    stats_start = now;
+    intervals = short_intervals = long_intervals = 0;
   }
 }

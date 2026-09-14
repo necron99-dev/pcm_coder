@@ -105,6 +105,10 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
   newOption(app, "--vsync_delay", options.Rpi_vsync_delay,
             "RPI vsync delay, in us.")
       ->needs(rpi_mode);
+#else
+  newFlag(app, "--display-stats", options.Rpi_display_stats,
+          "Report SDL presentation intervals every five seconds (diagnostic).")
+      ->needs(rpi_mode);
 #endif
   newOption(app, "--left_offset", options.Rpi_left_offset, "RPI left offet.")
       ->needs(rpi_mode);

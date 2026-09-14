@@ -23,10 +23,27 @@ target_include_directories(CLI11 INTERFACE ${CLI11_DIR})
 
 set(FFmpegVideoReader_DIR ${CMAKE_CURRENT_SOURCE_DIR}/pcm_utils/FFmpegVideoReader)
 
+# The pinned writer copies the destination's padded stride from a tightly
+# packed input row. That reads beyond the last input row. Build a corrected
+# copy without changing the submodule checkout.
+set(writer_source "${FFmpegVideoReader_DIR}/FFmpegVideoWriter.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${writer_source}")
+file(READ "${writer_source}" writer_code)
+set(writer_bad_copy "std::memcpy(tframe->data[0] + offset_dest, pixel_data + offset_src, linesize);")
+string(FIND "${writer_code}" "${writer_bad_copy}" writer_copy_offset)
+if(writer_copy_offset EQUAL -1)
+    message(FATAL_ERROR "The pcm_utils writer changed; review the packed-row compatibility fix in libs/CMakeLists.txt")
+endif()
+string(REPLACE "${writer_bad_copy}"
+    "std::memcpy(tframe->data[0] + offset_dest, pixel_data + offset_src, tframe->width);\n        std::memset(tframe->data[0] + offset_dest + tframe->width, 0, linesize - tframe->width);"
+    writer_code "${writer_code}")
+set(patched_writer "${CMAKE_CURRENT_BINARY_DIR}/FFmpegVideoWriter.cpp")
+file(WRITE "${patched_writer}" "${writer_code}")
+
 set(FFmpegVideoReader_SRC
     ${FFmpegVideoReader_DIR}/Context.cpp
     ${FFmpegVideoReader_DIR}/FFmpegVideoReader.cpp
-    ${FFmpegVideoReader_DIR}/FFmpegVideoWriter.cpp
+    ${patched_writer}
 )
 
 add_library(FFmpegVideoReader STATIC ${FFmpegVideoReader_SRC})

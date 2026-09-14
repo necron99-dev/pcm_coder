@@ -80,7 +80,7 @@ struct PCMLine {
 private:
   uint16_t data[TotalDataPreLineWithCRC];
 
-  std::array<uint8_t, TotalChanelSamplesWithP * BITS_PRE_COLUMN>
+  std::array<uint8_t, TotalDataPreLine * BITS_PRE_COLUMN>
   toBinArray(const uint16_t data[]) const;
 
   uint16_t QfromBinArray(std::array<uint8_t, BITS_PRE_COLUMN> &src) const;
