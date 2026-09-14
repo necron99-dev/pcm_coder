@@ -9,6 +9,9 @@ It replaces the old dependency on `/opt/vc`, `bcm_host`, and DispmanX.
 **Live PCM output is experimental until verified on a Pi and hardware decoder.**
 A successful build or visible video does not establish decoder lock: field
 order, scan-line alignment, and sustained playback timing need hardware checks.
+Testing with an NTSC Sony PCM-501ES has produced noise despite visible composite
+output and crop/offset adjustments. This configuration is not yet confirmed
+to deliver usable audio.
 
 ## Build
 
@@ -37,7 +40,12 @@ File-encoding smoke checks (requires `python3` and `ffmpeg`):
 
 ```sh
 python3 tests/smoke.py ./build/src/pcm_coder
+python3 tests/pcm_roundtrip.py ./build/src/pcm_coder
 ```
+
+The round-trip check extracts bits from the generated video, checks every row's
+CRC, and recovers known audio samples in PAL/NTSC and 14/16-bit modes. It does
+not test the physical signal, error correction, or complete EOF flushing.
 
 To build only the file encoder, configure with `-DENABLE_PLAYER=OFF`.
 SDL2 and PortAudio development packages are then unnecessary. File encoding
@@ -64,14 +72,29 @@ Keep the full KMS driver. Do not switch to `vc4-fkms-v3d` or follow old
 **single line** in `/boot/firmware/cmdline.txt`, separated by a space:
 
 ```text
-vc4.tv_norm=PAL
+video=Composite-1:720x576ie,tv_mode=PAL
 ```
 
-For NTSC use `vc4.tv_norm=NTSC` instead. Preserve the other boot parameters,
-including `root=...`. Reboot, then verify that the console appears on the
-composite display. The player expects 720×576 (PAL) or 720×480 (NTSC).
+For an NTSC decoder, including an NTSC Sony PCM-501ES, use this instead:
 
-These settings follow Raspberry Pi's [composite video documentation](https://github.com/raspberrypi/documentation/blob/master/documentation/asciidoc/computers/config_txt/video.adoc).
+```text
+video=Composite-1:720x480ie,tv_mode=NTSC
+```
+
+Replace any existing `video=Composite-1:...` parameter rather than adding a
+second one. Preserve the other boot parameters, including `root=...`.
+The `i` selects interlaced output and `e` forces the connector on. Selecting
+the TV standard alone with `vc4.tv_norm` does not force connector detection.
+Reboot, then verify that the console appears on the composite display. The
+player expects 720×576 (PAL) or 720×480 (NTSC).
+
+The Pi's composite driver can report `unknown` connection status, and SDL2
+requires a connector reported as `connected` with available modes. Forcing
+the connector on addresses this initialization problem; it does not verify
+the PCM decoder's field timing or audio recovery.
+
+These settings follow Raspberry Pi's [composite video documentation](https://github.com/raspberrypi/documentation/blob/master/documentation/asciidoc/computers/config_txt/video.adoc)
+and the kernel's [video mode parameter documentation](https://docs.kernel.org/fb/modedb.html).
 
 ## Play from the local console
 
@@ -86,7 +109,8 @@ the environment. It detects PAL/NTSC from display dimensions, so do not combine
 it with `--pal` or `--ntsc`. Ctrl+C stops playback. PortAudio is not opened in
 this mode: audio is carried in the composite PCM image.
 
-Start with `--crop-top 0` and adjust for your decoder. The KMS path preserves
+The command above is a diagnostic starting point, not a verified alignment for
+the Sony decoder. The KMS path preserves
 source scan lines vertically, clipping at the display edges; cropping moves
 the image upward and does not stretch the remaining lines. `--left_offset`
 and `--right_offset` set horizontal margins. Leave `--heigth_mod` at zero
@@ -94,11 +118,40 @@ unless deliberately experimenting with vertical scaling.
 
 The renderer requests vsync and paces complete PCM images at 25 fps (PAL) or
 30000/1001 fps (NTSC). SDL does not expose field parity here, so this path
-does not guarantee the legacy DispmanX callback's field phase. If the decoder
-cannot lock after alignment adjustments, capture the output timing before
-assuming a crop value will fix it.
+does not guarantee the legacy DispmanX callback's field phase.
 
-If SDL cannot initialize KMSDRM, check that you are on an active local console,
+If playback produces noise, leave the player running and use a second SSH
+session to read the active display state:
+
+```sh
+sudo cat /sys/kernel/debug/dri/0/state
+```
+
+This path assumes the composite device is `card0`, as shown in
+`/sys/class/drm/card0-Composite-1/status`. Adjust the index for another card.
+Record the exact playback command with the output. The state helps check the
+active mode and framebuffer source/destination rectangles. It cannot measure
+the analogue waveform or establish field order at the decoder.
+
+The encoder's NTSC image contains 492 rows before padding, while the selected
+display mode has 480 active rows. The default 525-row padded image therefore
+cannot fit without clipping; crop/offset changes alone do not establish correct
+PCM timing. Diagnose the mode, scan-line mapping, and frame presentation before
+continuing alignment experiments.
+
+If SDL reports `kmsdrm not available`, first inspect the connector statuses:
+
+```sh
+grep -H . /sys/class/drm/card*-*/status
+```
+
+If the composite connector reports `unknown`, check that the forced
+`video=Composite-1:...ie,tv_mode=...` parameter above is present in
+`/proc/cmdline` after rebooting. SDL's [connector probe](https://github.com/libsdl-org/SDL/blob/release-2.32.4/src/video/kmsdrm/SDL_kmsdrmvideo.c)
+does not accept an unknown status, even when KMSDRM is compiled in and the
+account can access the DRM device.
+
+If SDL still cannot initialize KMSDRM, check that you are on an active local console,
 no desktop compositor owns the display, and `/dev/dri/` exists. Inspect device
 access with `ls -l /dev/dri` and `id`. If your account lacks access, add it to
 the `video` and `render` groups and log out and back in:
