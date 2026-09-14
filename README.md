@@ -8,10 +8,11 @@ The Raspberry Pi setup targets **Pi 3B+ with Raspberry Pi OS Lite (Trixie)**.
 See the [Pi setup guide](docs/raspberry-pi-os-lite.md) for composite wiring,
 boot configuration, playback, and troubleshooting.
 
-**Live composite playback through the new KMS backend is experimental.**
-Builds and file encoding have been checked in a Debian Trixie container;
-interlaced timing, scan-line alignment, and decoder lock still need testing
-on a physical Pi and PCM decoder.
+**KMS composite playback has been reported working on a Pi 3B+ with an NTSC
+Sony PCM-501ES**, using default 14-bit encoding and `--left_offset 9`.
+The command below records that setup. Other decoder/TV-standard combinations
+still need hardware validation; builds and file checks also run in a Debian
+Trixie container.
 
 ## Features
 
@@ -117,21 +118,23 @@ preserving the signal is the priority.
 ### Play through Raspberry Pi composite output
 
 First follow the [Pi 3B+ / Raspberry Pi OS Lite guide](docs/raspberry-pi-os-lite.md)
-to enable composite output and select PAL or NTSC. Then, from the Pi's local
-text console:
+to enable composite output and select PAL or NTSC. This command has been
+reported working with the **NTSC Sony PCM-501ES**:
 
 ```sh
-SDL_VIDEODRIVER=kmsdrm ./build/src/pcm_coder -R --crop-top 0 input.wav
+SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
+  ./build/src/pcm_coder -R --crop-top 0 --left_offset 9 input.wav
 ```
 
 `-R` detects PAL or NTSC from the display dimensions. Use it without an output
 filename or `--pal`/`--ntsc`. This mode carries audio in the composite PCM
 image and does not open a separate audio playback device. Press Ctrl+C to stop.
 
-Start with `--crop-top 0` and adjust scan-line alignment for your decoder.
-The KMS backend preserves vertical scan lines when cropping and clips the
-image at the display edges. The setup guide describes the remaining timing
-limitations and display-access requirements.
+This uses 14-bit encoding, P/Q correction, a zero right offset, and no field
+swap. On a 720-pixel display, the left offset both shifts the image and narrows
+it to 711 pixels. The KMS backend preserves vertical scan lines when cropping
+and clips at the display edges. See the setup guide for test limitations,
+diagnostics, and console/SSH display access.
 
 ### Preview on a desktop
 

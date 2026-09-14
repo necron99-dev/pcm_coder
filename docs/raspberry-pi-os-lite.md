@@ -6,12 +6,11 @@ Use a fresh Lite image from Raspberry Pi Imager when moving from an older OS.
 
 The `-R` display path uses SDL2's KMSDRM backend and runs without a desktop.
 It replaces the old dependency on `/opt/vc`, `bcm_host`, and DispmanX.
-**Live PCM output is experimental until verified on a Pi and hardware decoder.**
-A successful build or visible video does not establish decoder lock: field
-order, scan-line alignment, and sustained playback timing need hardware checks.
-Testing with an NTSC Sony PCM-501ES has produced noise despite visible composite
-output and crop/offset adjustments. This configuration is not yet confirmed
-to deliver usable audio.
+**Audio playback has been reported working on a Pi 3B+ with an NTSC Sony
+PCM-501ES**, using default 14-bit encoding, `--crop-top 0`, and
+`--left_offset 9`. Zero horizontal offsets previously produced noise.
+This is a listening result for that setup; waveform accuracy, bit-error rate,
+16-bit playback, and other decoder/TV-standard combinations remain unverified.
 
 ## Build
 
@@ -99,22 +98,29 @@ the PCM decoder's field timing or audio recovery.
 These settings follow Raspberry Pi's [composite video documentation](https://github.com/raspberrypi/documentation/blob/master/documentation/asciidoc/computers/config_txt/video.adoc)
 and the kernel's [video mode parameter documentation](https://docs.kernel.org/fb/modedb.html).
 
-## Play from the local console
+## Play through composite
 
-Log in on the Pi's local text console, then run:
+The following command was reported to play audio successfully through the
+NTSC PCM-501ES. It was run over SSH with no desktop compositor owning DRM:
 
 ```sh
-SDL_VIDEODRIVER=kmsdrm ./build/src/pcm_coder -R --crop-top 0 input.wav
+SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
+  ./build/src/pcm_coder -R --crop-top 0 --left_offset 9 input.wav
 ```
+
+The omitted options retain their defaults: 14-bit encoding, P and Q enabled,
+right offset zero, height modifier zero, and no field swap. The inherited value
+of `SDL_VIDEO_DOUBLE_BUFFER` was not recorded for the successful test.
 
 `-R` selects KMSDRM automatically unless an SDL driver is explicitly set in
 the environment. It detects PAL/NTSC from display dimensions, so do not combine
 it with `--pal` or `--ntsc`. Ctrl+C stops playback. PortAudio is not opened in
 this mode: audio is carried in the composite PCM image.
 
-The command above is a diagnostic starting point, not a verified alignment for
-the Sony decoder. The KMS path preserves
-source scan lines vertically, clipping at the display edges; cropping moves
+On the 720-pixel display, `--left_offset 9` draws a 711-pixel-wide image starting
+at horizontal pixel 9. It changes both image position and bit-cell width.
+The KMS path preserves source scan lines vertically, clipping at the display
+edges; cropping moves
 the image upward and does not stretch the remaining lines. `--left_offset`
 and `--right_offset` set horizontal margins. Leave `--heigth_mod` at zero
 unless deliberately experimenting with vertical scaling.
@@ -122,6 +128,8 @@ unless deliberately experimenting with vertical scaling.
 The renderer requests vsync and paces complete PCM images at 25 fps (PAL) or
 30000/1001 fps (NTSC). SDL does not expose field parity here, so this path
 does not guarantee the legacy DispmanX callback's field phase.
+
+## Diagnose noise or timing problems
 
 If playback produces noise, leave the player running and use a second SSH
 session to read the active display state:
@@ -150,13 +158,10 @@ periods after horizontal sync begins. With 858 pixel periods per line, the
 encoder's 139-cell image should span `139 * 858 / 168 = 709.893` pixels.
 Stretching it to 720 pixels makes it about 1.4% too wide.
 
-The mode places the start of active video 122 pixel periods after horizontal
-sync begins. The encoder's first sync pulse is one cell into its image, so
-the image origin should be `25 * 858 / 168 - 122 = 5.679` pixels. Rounded
-to whole pixels, `--left_offset 6 --right_offset 4` provides a 710-pixel
-image with that origin. This is a calculated horizontal alignment for this
-specific NTSC mode; it has not yet been confirmed to fix Sony playback.
-It does not correct the vertical alignment or frame presentation timing.
+The working `--left_offset 9` setting narrows the image to 711 pixels, close
+to that calculated width, and moves it to the right. Use the reported working
+setting for this setup; the nominal timing calculation alone does not capture
+the full analogue signal path or decoder tolerance.
 
 In the software erasure model, P parity can recover the data lost to this
 default clipping pattern. Clipping alone therefore does not establish the
@@ -167,7 +172,7 @@ To collect presentation timing measurements, run:
 
 ```sh
 SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 SDL_VIDEO_DOUBLE_BUFFER=1 \
-  ./build/src/pcm_coder -R --14 --crop-top 0 --display-stats input.wav
+  ./build/src/pcm_coder -R --14 --crop-top 0 --left_offset 9 --display-stats input.wav
 ```
 
 Keep it running for at least 20 seconds and record the `KMS geometry` and
@@ -188,7 +193,7 @@ For a controlled field-order comparison, repeat the same playback command with
 
 ```sh
 SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
-  ./build/src/pcm_coder -R --14 --crop-top 0 --swap-fields input.wav
+  ./build/src/pcm_coder -R --14 --crop-top 0 --left_offset 9 --swap-fields input.wav
 ```
 
 Keep the bit depth, crop, offsets, and SDL environment identical between the
