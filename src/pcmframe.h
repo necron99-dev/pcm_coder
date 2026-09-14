@@ -29,7 +29,7 @@ struct PCMFrame : public IFrame {
 
   static constexpr auto HEADER_SIZE_LINES = 2;
 
-  PCMFrame(size_t heigth, const PCMLine &headerLine);
+  PCMFrame(size_t heigth, const PCMLine &headerLine, bool swap_fields = false);
 
   PixelContainer render(uint8_t grayLevel = 150,
                         uint8_t white_lvl = 255) const override;
@@ -44,6 +44,7 @@ struct PCMFrame : public IFrame {
 private:
   std::vector<PCMLine> data;
   const PCMLine &headerLine;
+  bool swap_fields;
 };
 
 struct PCMFrameEof : public IFrame {

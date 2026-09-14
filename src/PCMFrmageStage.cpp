@@ -29,12 +29,12 @@ PCMLine buildHeaderLine(bool copy_protection, bool have_P, bool have_Q) {
 }
 
 PCMFrameStage::PCMFrameStage(bool is14bit, bool generate_P, bool generate_Q,
-                               bool copy_protection, bool isPal)
+                               bool copy_protection, bool isPal, bool swap_fields)
     : heigth{getHeigth(isPal)}, headerlune{buildHeaderLine(
                                     copy_protection, generate_P, generate_Q)},
-      currentFrame{std::make_unique<PCMFrame>(getHeigth(isPal), headerlune)},
-      nextFrame{std::make_unique<PCMFrame>(getHeigth(isPal), headerlune)},
-      mainItherator{*currentFrame}, is14Bit{is14bit} {}
+      currentFrame{std::make_unique<PCMFrame>(getHeigth(isPal), headerlune, swap_fields)},
+      nextFrame{std::make_unique<PCMFrame>(getHeigth(isPal), headerlune, swap_fields)},
+      mainItherator{*currentFrame}, is14Bit{is14bit}, swap_fields{swap_fields} {}
 
 void PCMFrameStage::Ressive(const PCMLine &line) {
   if (line.isEOF()) {
@@ -63,7 +63,7 @@ void PCMFrameStage::Ressive(const PCMLine &line) {
 
 void PCMFrameStage::process_redy_frame() {
   std::unique_ptr<PCMFrame> processedFrame =
-      std::make_unique<PCMFrame>(heigth, headerlune);
+      std::make_unique<PCMFrame>(heigth, headerlune, swap_fields);
 
   std::swap(processedFrame, currentFrame);
   mainItherator = mainItherator.changeFrame(*currentFrame);

@@ -10,7 +10,7 @@
 
 struct PCMFrameStage : public AbstractprocessingStage<PCMLine, IFrame> {
   PCMFrameStage(bool is14bit, bool generate_P, bool generate_Q,
-                 bool copy_protection, bool isPal);
+                 bool copy_protection, bool isPal, bool swap_fields = false);
 
   void Ressive(const PCMLine &line) override;
 
@@ -21,6 +21,7 @@ private:
   std::unique_ptr<PCMFrame> nextFrame;
   SampleStairsItherator mainItherator;
   bool is14Bit;
+  bool swap_fields;
 
   void process_redy_frame();
   void generateCRC(std::unique_ptr<PCMFrame> &frame);

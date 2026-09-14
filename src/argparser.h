@@ -19,6 +19,7 @@ struct Options {
   bool parity = true;
   bool m_Q = true;
   bool copyProtection = false;
+  bool swap_fields = false;
 #ifdef PLAYER
   bool rpiMode = false;
 #endif

@@ -82,6 +82,8 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
 
   newFlag(app, "--14,!--16", options.width14, "Output bit widtht: 14/16 bit.",
           options.bitWidthsStr());
+  newFlag(app, "--swap-fields", options.swap_fields,
+          "Exchange the two PCM image fields before cropping (diagnostic).");
   newFlag(app, "--with-dither,!--no-dither,!--ND", options.use_dither,
           "Use dither when convering 16 bit -> 14 bit.");
   newFlag(app, "--with-parity,!--no-parity,!--NP", options.parity,
@@ -144,6 +146,9 @@ void Options::dump(std::ostream &os) const {
 
   if ((crop_top || crop_bot)) {
     os << "\tCrop video top=" << crop_top << ", bot=" << crop_bot << endl;
+  }
+  if (swap_fields) {
+    os << "\tPCM image fields: swapped before cropping" << endl;
   }
   if (codec != uncompresed) {
     os << "\tVideo bitrate: " << bitrate << endl;

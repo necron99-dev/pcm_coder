@@ -152,7 +152,8 @@ static int play(Options &options) {
                                             options.generateQ()})
           .NextStage(new PCMFrameStage(options.width14, options.parity,
                                        options.generateQ(),
-                                       options.copyProtection, options.pal));
+                                       options.copyProtection, options.pal,
+                                       options.swap_fields));
 
   if (options.Play()) {
 #ifdef PLAYER

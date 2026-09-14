@@ -139,6 +139,26 @@ cannot fit without clipping; crop/offset changes alone do not establish correct
 PCM timing. Diagnose the mode, scan-line mapping, and frame presentation before
 continuing alignment experiments.
 
+For a controlled field-order comparison, repeat the same playback command with
+`--swap-fields` added:
+
+```sh
+SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
+  ./build/src/pcm_coder -R --14 --crop-top 0 --swap-fields input.wav
+```
+
+Keep the bit depth, crop, offsets, and SDL environment identical between the
+two runs. This option exchanges the two PCM image fields before cropping,
+without resizing the image or changing the output mode. It is available for
+file encoding as well, and the round-trip test checks both field arrangements.
+An odd top crop also changes which raster parity carries each field.
+
+The Pi driver's [NTSC field timing](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/drivers/gpu/drm/vc4/vc4_crtc.c)
+differs from PAL. That is a reason to test field order, not proof that swapping
+is required. The switch does not synchronize page flips to a particular field,
+restore clipped rows, or establish correct analogue timing. Remove it to
+return to the original field arrangement.
+
 If SDL reports `kmsdrm not available`, first inspect the connector statuses:
 
 ```sh

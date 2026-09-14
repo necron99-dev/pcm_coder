@@ -2,9 +2,10 @@
 
 #include "pcmframe.h"
 
-PCMFrame::PCMFrame(size_t heigth, const PCMLine &headerLine)
+PCMFrame::PCMFrame(size_t heigth, const PCMLine &headerLine, bool swap_fields)
     : IFrame(PIXEL_WIDTH, heigth),
-      data(heigth - HEADER_SIZE_LINES), headerLine{headerLine} {}
+      data(heigth - HEADER_SIZE_LINES), headerLine{headerLine},
+      swap_fields{swap_fields} {}
 
 IFrame::PixelContainer PCMFrame::render(uint8_t grayLevel,
                                         uint8_t white_lvl) const {
@@ -39,6 +40,11 @@ IFrame::PixelContainer PCMFrame::render(uint8_t grayLevel,
       l = (dl - height / 2) * 2 + 1;
     }
 
+    // Swap each pair of raster rows, preserving the line's position within
+    // its field. Both control rows are identical and stay in place.
+    if (swap_fields) {
+      l ^= 1;
+    }
     auto line = dest.getLine(l + HEADER_SIZE_LINES);
 
     line[SYNC_LINE_1] = grayLevel;

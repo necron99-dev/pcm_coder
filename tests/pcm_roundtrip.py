@@ -5,6 +5,7 @@ Usage: python3 tests/pcm_roundtrip.py build/src/pcm_coder
 This exercises the encoder, not the physical composite output or Sony's decoder.
 """
 import binascii
+import itertools
 import pathlib
 import random
 import struct
@@ -45,10 +46,10 @@ with tempfile.TemporaryDirectory(prefix="pcm-roundtrip-") as directory:
     for standard, height, top, rows_per_field in (
         ("ntsc", 525, 18, 245), ("pal", 625, 14, 294)
     ):
-        for depth in (14, 16):
-            dest = root / f"{standard}-{depth}.avi"
+        for depth, swapped in itertools.product((14, 16), (False, True)):
+            dest = root / f"{standard}-{depth}-{swapped}.avi"
             run(binary, f"--{standard}", f"--{depth}", "--no-dither",
-                str(source), str(dest))
+                *(["--swap-fields"] if swapped else []), str(source), str(dest))
             pixels = run("ffmpeg", "-v", "error", "-i", str(dest),
                          "-f", "rawvideo", "-pix_fmt", "gray", "-")
             frame_size = 720 * height
@@ -60,7 +61,8 @@ with tempfile.TemporaryDirectory(prefix="pcm-roundtrip-") as directory:
             # horizontal resize, independently of its interpolation filter.
             bit_x = [int((5 + bit + 0.5) * 720 / 139) for bit in range(128)]
             for frame in range(frames):
-                for field in range(2):
+                # Read chronological fields from their selected raster parity.
+                for field in ((1, 0) if swapped else (0, 1)):
                     # One control row followed by the data rows in each field.
                     for line in range(rows_per_field + 1):
                         y = top + 2 * line + field
@@ -93,6 +95,6 @@ with tempfile.TemporaryDirectory(prefix="pcm-roundtrip-") as directory:
                         expected = (expected >> 2) & 0x3fff
                     assert recovered == expected, (
                         standard, depth, group, column, recovered, expected)
-            print(f"PASS: {standard.upper()} {depth}-bit: {checked_crc} row CRCs; "
+            print(f"PASS: {standard.upper()} {depth}-bit, swap={swapped}: {checked_crc} row CRCs; "
                   f"{groups * 3} stereo sample pairs recovered exactly "
                   "(EOF flushing not checked)")
