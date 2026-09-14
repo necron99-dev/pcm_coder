@@ -73,7 +73,10 @@ target_link_libraries(common
 
 if (USE_PLAYER)
     # https://github.com/zanac/OpenPB4/blob/master/RetroPie/EmulationStation/CMakeLists.txt
-    if(EXISTS "/opt/vc/include/bcm_host.h")
+    if(ENABLE_LEGACY_RPI)
+        if(NOT EXISTS "/opt/vc/include/bcm_host.h")
+            message(FATAL_ERROR "Legacy DispmanX needs /opt/vc. Disable ENABLE_LEGACY_RPI for Raspberry Pi OS with KMS.")
+        endif()
         # ref: https://github.com/ali1234/raspi-teletext
         add_executable(rpi-fb-shifter rpi_fb_shifter.cpp)
 
@@ -85,6 +88,8 @@ if (USE_PLAYER)
         install(TARGETS rpi-fb-shifter)
 
         SET(RPI ON)
+    elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        set(RPI ON)
     endif()
 
     set(PLAY_LIN_SRC
@@ -99,10 +104,11 @@ if (USE_PLAYER)
     )
 
     if (RPI)
-        list(APPEND PLAY_LIN_SRC
-            RPIFbDisplayConsumer.h
-            RPIFbDisplayConsumer.cpp
-        )
+        if(ENABLE_LEGACY_RPI)
+            list(APPEND PLAY_LIN_SRC RPIFbDisplayConsumer.h RPIFbDisplayConsumer.cpp)
+        else()
+            list(APPEND PLAY_LIN_SRC KMSDisplayConsumer.h KMSDisplayConsumer.cpp)
+        endif()
     endif()
 
     add_library(playlib STATIC ${PLAY_LIN_SRC})
@@ -122,6 +128,11 @@ if (USE_PLAYER)
             PUBLIC
                 -DRPI
         )
+    endif()
+
+    if(ENABLE_LEGACY_RPI)
+        target_compile_definitions(common PUBLIC RPI_LEGACY)
+        target_compile_definitions(playlib PUBLIC RPI_LEGACY)
         target_include_directories(playlib
             PRIVATE
                 "/opt/vc/include"

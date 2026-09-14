@@ -1,4 +1,10 @@
 
+foreach(required_file CLI11/include/CLI/CLI.hpp pcm_utils/FFmpegVideoReader/WriteContext.h progress-cpp/include/progresscpp/ProgressBar.hpp)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${required_file}")
+        message(FATAL_ERROR "Missing submodules. Run: git submodule update --init --recursive")
+    endif()
+endforeach()
+
 find_package(FFMPEG REQUIRED)
 
 ##############
@@ -42,6 +48,7 @@ target_link_libraries(FFmpegVideoReader
 # PlayerWriter
 ##############
 
+if(ENABLE_PLAYER)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
 
 set(CMAKE_DEBUG_POSTFIX d)
@@ -101,11 +108,12 @@ find_package(SDL2)
 find_package(PORTAUDIO)
 
 endif()
+endif()
 
 set(PlayerWriter_DIR ${CMAKE_CURRENT_SOURCE_DIR}/pcm_utils/PlayerWriter)
 
 
-if ((SDL2_FOUND) AND (PORTAUDIO_FOUND) AND (PORTAUDIO_VERSION EQUAL 19))
+if (ENABLE_PLAYER AND SDL2_FOUND AND PORTAUDIO_FOUND AND PORTAUDIO_VERSION EQUAL 19)
     set(ADD_LIBS ${PORTAUDIO_LIBRARIES})
     set(ADD_INCLUDES_PATHS ${PORTAUDIO_INCLUDE_DIRS})
     if (SDL2_LIBRARIES)
@@ -164,4 +172,6 @@ target_include_directories(pcm_utils PUBLIC ${pcm_utils_DIR})
 # progress-cpp
 ##############
 
-add_subdirectory(progress-cpp)
+# Only its headers are needed; upstream CMake downloads packaging tools.
+add_library(progresscpp INTERFACE)
+target_include_directories(progresscpp INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/progress-cpp/include)

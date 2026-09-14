@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <mutex>
+#include <tuple>
 
 #include <SDL2/SDL.h>
 
@@ -37,8 +38,8 @@ private:
   static void buildGrayscalePalete();
 
 protected:
-  SDL_Window *window;
-  SDL_Renderer *renderer;
+  SDL_Window *window = nullptr;
+  SDL_Renderer *renderer = nullptr;
   int32_t width, heigth;
 
   static SDL_Palette *palete;

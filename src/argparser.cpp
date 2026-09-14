@@ -65,6 +65,7 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
 #ifdef RPI
   auto rpi_mode =
       newFlag(app, "-R,--rpi-mode", options.rpiMode, "Raspberry PI mode");
+  rpi_mode->excludes(output);
 #endif
 
   auto codec_opt = newOption(app, "-c,--video-codec", options.codec,
@@ -98,9 +99,11 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
             "Crop N lines from BOTTOM of frame.");
 
 #ifdef RPI
+#ifdef RPI_LEGACY
   newOption(app, "--vsync_delay", options.Rpi_vsync_delay,
             "RPI vsync delay, in us.")
       ->needs(rpi_mode);
+#endif
   newOption(app, "--left_offset", options.Rpi_left_offset, "RPI left offet.")
       ->needs(rpi_mode);
   newOption(app, "--right_offset", options.Rpi_right_offset,
@@ -151,5 +154,5 @@ int parseArguments(int argc, char *argv[], Options &options) {
   CLI::App app{"PCM encoder"};
   configureArgumentParcer(app, options);
   CLI11_PARSE(app, argc, argv);
-  return 0;
+  return -1; // Continue only after normal parsing; --help returns exit code 0.
 }

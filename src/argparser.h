@@ -2,6 +2,8 @@
 #define ARGPARSER_H
 
 #include <string>
+#include <cstdint>
+#include <iosfwd>
 
 namespace CLI {
 class App;
@@ -51,6 +53,7 @@ struct Options {
   void dump(std::ostream &os) const;
 };
 
+// -1 means run the program; otherwise return this exit code (including --help).
 int parseArguments(int argc, char *argv[], Options &options);
 
 #endif // ARGPARSER_H

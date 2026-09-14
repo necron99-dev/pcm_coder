@@ -1,182 +1,217 @@
 # PCM Encoder
 
-Генератор PCM видео из звуковых файлов.
+Convert audio files into PAL or NTSC video carrying PCM audio data. Save the
+result as a video file, preview it with sound on a desktop, or send it through
+a Raspberry Pi's composite output to a hardware PCM decoder.
 
+The Raspberry Pi setup targets **Pi 3B+ with Raspberry Pi OS Lite (Trixie)**.
+See the [Pi setup guide](docs/raspberry-pi-os-lite.md) for composite wiring,
+boot configuration, playback, and troubleshooting.
+
+**Live composite playback through the new KMS backend is experimental.**
+Builds and file encoding have been checked in a Debian Trixie container;
+interlaced timing, scan-line alignment, and decoder lock still need testing
+on a physical Pi and PCM decoder.
 
 ## Features
 
-* Открывает любые поддерживаемые FFmpeg звуковые файлы (также видео со звуковой дорожкой)
-* Кодирование в PCM видеопоток формата PAL и NTSC
-* Режим просмотра: дисплей + звук
-* Кодирование видео средствами FFmpeg: Возможность указать видеокодек и битрейт
+- Read audio formats supported by FFmpeg, including audio tracks in video files.
+- Generate PAL or NTSC PCM video with 14-bit or 16-bit audio encoding.
+- Configure dithering, parity, Q generation, and the copy-protection bit.
+- Save video using FFmpeg, with a selectable codec and bitrate.
+- Preview video and sound using SDL2 and PortAudio.
+- Play composite video from a Pi's local text console using SDL2/KMSDRM.
+- Crop scan lines from the top and bottom of the image.
 
+## Build on Raspberry Pi OS Lite or Debian Linux
 
-## Сборка
+You need Git, CMake 3.16 or newer, a C++17 compiler, and FFmpeg development
+libraries. Playback also requires SDL2 and PortAudio. The compatibility checks
+used GCC 14, FFmpeg 7.1, and SDL2 2.32 on Debian Trixie.
 
-* Клонировать репозиторий
+Install dependencies:
 
+```sh
+sudo apt update
+sudo apt install -y build-essential cmake pkg-config git \
+  ffmpeg libsdl2-dev portaudio19-dev \
+  libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev \
+  libavutil-dev libswresample-dev libswscale-dev
 ```
-git clone https://github.com/ololoshka2871/pcm_coder.git && cd pcm_coder
+
+Clone the repository and its pinned dependencies:
+
+```sh
+git clone --recurse-submodules https://github.com/necron99-dev/pcm_coder.git
+cd pcm_coder
 ```
 
-* Клонировать субмодули
+For an existing checkout, initialize the dependencies with:
 
-```
+```sh
 git submodule update --init --recursive
 ```
 
-* Создать каталог для сборки и перейти в него
+Configure and build:
 
-```
-mkdir build && cd build
-```
-
-
-### Linux
-
-Необходимые зависимости:
-
-* [SDL2](https://www.libsdl.org/download-2.0.php)
-* [portaudio](http://www.portaudio.com/)
-* [ffmpeg](http://ffmpeg.org/)
-* [cmake](https://cmake.org/)
-* Компилятор gcc/clang с поддержкой С++17
-
-
-* Конфигурирование
-
-```
-cmake .. -DCMAKE_BUILD_TYPE=Release
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+./build/src/pcm_coder --help
 ```
 
-* Сборка
+Using two compiler jobs keeps memory use lower on the Pi 3B+. The executable
+is `build/src/pcm_coder`. All examples below run it from the repository root.
 
+Optional system-wide installation:
+
+```sh
+sudo cmake --install build
 ```
-make
+
+After installation, you can use `pcm_coder` directly.
+
+### Build only the file encoder
+
+File encoding works over SSH without a display. To disable playback, omit
+`libsdl2-dev` and `portaudio19-dev` from the dependency installation and build
+with:
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_PLAYER=OFF
+cmake --build build -j2
 ```
 
-* Исполняемый файл находится в подкаталоге src
+An encoding-only build requires both input and output filenames.
 
+## Usage
+
+### Encode a video file
+
+PAL with the default uncompressed video codec:
+
+```sh
+./build/src/pcm_coder --pal input.wav output.avi
+```
+
+NTSC with 16-bit audio encoding:
+
+```sh
+./build/src/pcm_coder --ntsc --16 input.flac output.avi
+```
+
+The defaults are PAL, 14-bit audio, and `rawvideo`. Dithering, parity, and Q
+generation are enabled by default; Q generation applies to 14-bit mode.
+
+To select an FFmpeg video encoder and bitrate, use `-c` and `-b` with this
+syntax, replacing `CODEC` and `BITRATE` with your values:
+
+```text
+./build/src/pcm_coder --pal -c CODEC -b BITRATE input.wav output.avi
+```
+
+The bitrate is specified in bits per second. Lossy video compression can
+damage the encoded PCM data; use the default uncompressed output when
+preserving the signal is the priority.
+
+### Play through Raspberry Pi composite output
+
+First follow the [Pi 3B+ / Raspberry Pi OS Lite guide](docs/raspberry-pi-os-lite.md)
+to enable composite output and select PAL or NTSC. Then, from the Pi's local
+text console:
+
+```sh
+SDL_VIDEODRIVER=kmsdrm ./build/src/pcm_coder -R --crop-top 0 input.wav
+```
+
+`-R` detects PAL or NTSC from the display dimensions. Use it without an output
+filename or `--pal`/`--ntsc`. This mode carries audio in the composite PCM
+image and does not open a separate audio playback device. Press Ctrl+C to stop.
+
+Start with `--crop-top 0` and adjust scan-line alignment for your decoder.
+The KMS backend preserves vertical scan lines when cropping and clips the
+image at the display edges. The setup guide describes the remaining timing
+limitations and display-access requirements.
+
+### Preview on a desktop
+
+With playback support built, omit the output filename:
+
+```sh
+./build/src/pcm_coder input.wav
+```
+
+This opens a video window and plays sound. It requires a graphical session
+and a working audio output device. Use `-R` for composite playback from a Lite
+console.
+
+### Common options
+
+| Option | Purpose |
+| --- | --- |
+| `--pal` / `--ntsc` | Select the video standard for encoding or desktop preview. |
+| `--14` / `--16` | Select the PCM audio bit width. |
+| `--no-dither` | Disable dithering when converting to 14-bit audio. |
+| `--no-parity` | Disable parity generation. |
+| `--no-q` | Disable Q generation in 14-bit mode. |
+| `--copy-protection` | Set the copy-protection bit. |
+| `-c CODEC` | Select an FFmpeg video encoder; requires an output filename. |
+| `-b BITRATE` | Set video bitrate; requires `-c` and an output filename. |
+| `--crop-top N` / `--crop-bot N` | Remove scan lines from the top or bottom. |
+| `-R` | Enable Raspberry Pi composite playback. |
+| `--left_offset N` / `--right_offset N` | Adjust horizontal margins in Pi mode. |
+| `--heigth_mod N` | Adjust image height in Pi mode; keep at zero to preserve vertical scan lines. |
+| `--help` | Show all options available in the current build. |
+
+`--heigth_mod` retains its original spelling for command-line compatibility.
+
+## Verification
+
+The smoke checks generate test audio, encode PAL and NTSC video, inspect and
+decode the output with FFmpeg, and check argument/error handling. They require
+Python 3 and the `ffmpeg` command-line tools:
+
+```sh
+sudo apt install -y python3
+python3 tests/smoke.py ./build/src/pcm_coder
+```
+
+These checks run without display hardware and do not verify composite output
+or hardware PCM decoding.
+
+## Other build configurations
 
 ### Windows
 
-Необходимые зависимости:
+The repository retains its MSVC build configuration, but it has not been
+validated as part of the Trixie compatibility work. It requires a C++17-capable
+Visual Studio toolchain, CMake, Git, and matching FFmpeg headers and import
+libraries. The old FFmpeg 4.2 download instructions no longer match the audio
+reader's channel-layout API.
 
-* [ffmpeg](http://ffmpeg.org/)
-* [cmake](https://cmake.org/)
-* [Build Tools for Visual Studio 2019](https://visualstudio.microsoft.com/thank-you-downloading-visual-studio/?sku=BuildTools&rel=16) или
-	Visual Studio 2019
-* [Visual C Runtime 2019](https://aka.ms/vs/16/release/vc_redist.x64.exe) Только для клиентов
+For an encoding-only build, the starting configuration is:
 
-
-* Распаковать [библиотеки](https://ffmpeg.zeranoe.com/builds/win64/shared/ffmpeg-4.2.3-win64-shared.zip) и 
-[хедеры](https://ffmpeg.zeranoe.com/builds/win64/dev/ffmpeg-4.2.3-win64-dev.zip) FFmpeg'а куда угодно, например в каталог ffmpeg
-
-```
-ffmpeg
-├───bin
-├───doc
-├───include
-│   ├───libavcodec
-│   ├───libavdevice
-│   ├───libavfilter
-│   ├───libavformat
-│   ├───libavutil
-│   ├───libpostproc
-│   ├───libswresample
-│   └───libswscale
-├───lib
-└───presets
+```powershell
+cmake -S . -B build -A x64 -DENABLE_PLAYER=OFF -DCMAKE_PREFIX_PATH="C:/ffmpeg"
+cmake --build build --config Release
 ```
 
-* Конфигурирование
+The FFmpeg prefix should contain `include`, `lib`, and `bin` directories.
+If discovery fails, set the `LIBAVCODEC`, `LIBAVDEVICE`, `LIBAVFORMAT`,
+`LIBAVUTIL`, `LIBSWRESAMPLE`, and `LIBSWSCALE` `_INCLUDE_DIR` and `_LIBRARIES`
+cache entries in CMake GUI to the corresponding headers and import libraries.
 
-**-A платформа**
-- x64 - 64 битный вариант
-- Win32 - 32 битный
+The executable is `build/src/Release/pcm_coder.exe`. Make the DLLs from the
+same FFmpeg build available on `PATH` or beside the executable. Windows
+playback uses older SDL2 and PortAudio dependency scripts and needs separate
+validation.
 
-```
-cmake .. -DCMAKE_BUILD_TYPE=Release -A x64 -DLIBAVCODEC_INCLUDE_DIR=<путь к ffmpeg>/include -DLIBAVDEVICE_INCLUDE_DIR=<путь к ffmpeg>/include -DLIBAVFORMAT_INCLUDE_DIR=<путь к ffmpeg>/include -DLIBAVUTIL_INCLUDE_DIR=<путь к ffmpeg>/include -DLIBSWRESAMPLE_INCLUDE_DIR=<путь к ffmpeg>/include -DLIBSWSCALE_INCLUDE_DIR=<путь к ffmpeg>/include
-```
+### Legacy Raspberry Pi graphics
 
-Или то же самое через cmake-gui
+For older systems that still provide DispmanX and `/opt/vc`, configure with
+`-DENABLE_LEGACY_RPI=ON`. This selects the original display backend and builds
+the `rpi-fb-shifter` utility. The legacy `--vsync_delay` option is available
+only in that configuration.
 
-* Сборка
-
-```
-cmake --build . --config Release
-```
-
-Исполняемый файл находится в подкаталоге src/Release
-
-Для запуска потребуется **скопировать библотеки**
-
-ffmpeg:
-- avcodec-58.dll
-- avdevice-58.dll
-- avfilter-7.dll
-- avformat-58.dll
-- avutil-56.dll
-- postproc-55.dll
-- swresample-3.dll
-- swscale-5.dll
-
-SDL2:
-- SDL2.dll (появится при сборке в каталоге `libs\dependencies\install\bin`)
-
-В один каталог с исполняемым файлом
-
-
-# Использование
-
-## Воспроизведение
-
-```
-$ pcm_coder <входной файл>
-```
-
-## Вопроизведение на Raspberry PI
-1. Используйте [инструкцию](https://www.raspberrypi.org/documentation/configuration/config-txt/video.md) Чтобы включить
-    композитный выход
-2. Убедитесь, что композит рботает
-
-```
-$ tvservice -s
-state 0x80000 [PAL 4:3], 720x576 @ 50.00Hz, interlaced
-```
-
-3. Зпустите воспроизведение командой
-```
-$ pcm_coder -R --crop-top X <входной файл>
-```
-
-Где:
-    `-R` - Активирует режим воспроизведения на Raspberry PI
-    `--crop-top X` - Сдвигает изображение "вверх" на указанное количество строк. Экспериментируёте с этим значением
-    начиная с 0, чтобы дабиться устойчивого воспроизведения на аппаратном декодере PCM
-
-### EXPERT:
-В состеве пакета также собирается утилита rpi-fb-shifter позволяющая аналогично утилете tvct из пакета [raspi-teletext](https://github.com/ali1234/raspi-teletext)
-Сдвигать фреймбуфер относительно строк видеосигнала. (запус должен требует прав root)
-
-```
-# rpi-fb-shifter -s <сдвиг> <on|off>
-```
-
-`сдвиг` - задает смещеине фреймбуфера **+** - вверх, **-** - вниз.
-Чтобы отключить режим сдвига используйте off, однако следует указать ранее установленное значение `-s`, иначе отменить
-сдвиг невозможно без перезагрузки.
-
-## Кодирование
-
-```
-pcm_coder -c <название кодека ffmpeg> -b <битрейт видео> {--pal|--ntsc} <входной файл> <выходной файл.avi>
-```
-
-Остальные опции кодирования смотри в справке `--help`
-
-## TODO
-
-* [v] Поддержка 16 бит (--16)
-* [v] Поддержка обрезки (--Cut) - Заменено на произвольную обрезку сверху и снизу --crop-*
-* [v] Поддержка вывода на Raspberry PI 1+
+Use the default KMS backend on Trixie. Do not run `rpi-fb-shifter` with KMS:
+it writes display registers directly while the kernel owns the display.

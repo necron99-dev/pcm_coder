@@ -84,11 +84,17 @@ struct AudioReader::Context {
 
     /**********************************/
 
+    // WAV and some other demuxers provide only a channel count. Give both
+    // the resampler and decoded frames the same concrete default layout.
+    if (pCodecContext->ch_layout.nb_channels <= 0) {
+      throw FFmpegException{AVERROR_INVALIDDATA};
+    }
+    if (pCodecContext->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
+      av_channel_layout_default(&pCodecContext->ch_layout,
+                                 pCodecContext->ch_layout.nb_channels);
+    }
     AVChannelLayout ch_layout_stereo = AV_CHANNEL_LAYOUT_STEREO;
     AVChannelLayout *pSrcLayout = &pCodecContext->ch_layout;
-    if (pCodecContext->ch_layout.nb_channels <= 0) {
-        pSrcLayout = &ch_layout_stereo;
-    }
 
     bool is_source_stereo = (av_channel_layout_compare(pSrcLayout, &ch_layout_stereo) == 0);
     if (pCodecContext->sample_fmt != AV_SAMPLE_FMT_S16 ||
@@ -202,9 +208,12 @@ bool AudioReader::getNextAudioData(const AudioSample_t *&pData,
     pResampledFrame->sample_rate = output_sample_rate;
     pResampledFrame->format = AV_SAMPLE_FMT_S16;
 
-     if (ctx->pFrame->ch_layout.nb_channels <= 0) {
-        av_channel_layout_uninit(&ctx->pFrame->ch_layout);
-        av_channel_layout_from_mask(&ctx->pFrame->ch_layout, AV_CH_LAYOUT_STEREO);
+    if (ctx->pFrame->ch_layout.nb_channels <= 0) {
+      throw FFmpegException{AVERROR_INVALIDDATA};
+    }
+    if (ctx->pFrame->ch_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
+      av_channel_layout_default(&ctx->pFrame->ch_layout,
+                                 ctx->pFrame->ch_layout.nb_channels);
     }
 
     auto err =

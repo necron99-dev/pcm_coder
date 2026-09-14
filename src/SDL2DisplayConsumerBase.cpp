@@ -1,6 +1,7 @@
 #include <climits>
 
 #include <iostream>
+#include <stdexcept>
 
 #include "SDL2DisplayConsumerBase.h"
 
@@ -22,7 +23,11 @@ SDL2DisplayConsumerBase::SDL2DisplayConsumerBase() : window{} {
   buildGrayscalePalete();
 }
 
-void SDL2DisplayConsumerBase::VideoInit() { SDL_Init(SDL_INIT_VIDEO); }
+void SDL2DisplayConsumerBase::VideoInit() {
+  if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    throw std::runtime_error(std::string("SDL video initialization failed: ") + SDL_GetError());
+  }
+}
 
 SDL2DisplayConsumerBase::~SDL2DisplayConsumerBase() {
   SDL_DestroyRenderer(renderer);
@@ -31,8 +36,10 @@ SDL2DisplayConsumerBase::~SDL2DisplayConsumerBase() {
 }
 
 std::tuple<int, int> SDL2DisplayConsumerBase::getDisplaySize() {
-  SDL_DisplayMode DM;
-  SDL_GetCurrentDisplayMode(0, &DM);
+  SDL_DisplayMode DM{};
+  if (SDL_GetCurrentDisplayMode(0, &DM) != 0) {
+    throw std::runtime_error(std::string("Cannot read display mode: ") + SDL_GetError());
+  }
   return std::make_tuple(DM.w, DM.h);
 }
 
@@ -55,12 +62,12 @@ void SDL2DisplayConsumerBase::Ressive(const IFrame &frame) {
 
   renderFrame(frame);
 
-  SDL_Event ev;
-  SDL_WaitEventTimeout(&ev, 0);
-
-  if (ev.type == SDL_QUIT) {
-    if (exit_cb) {
-      exit_cb();
+  SDL_Event ev{};
+  while (SDL_PollEvent(&ev)) {
+    if (ev.type == SDL_QUIT) {
+      if (exit_cb) {
+        exit_cb();
+      }
     }
   }
 }

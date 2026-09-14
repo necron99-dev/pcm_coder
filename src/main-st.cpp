@@ -21,7 +21,11 @@
 #include "SDL2DisplayConsumer.h"
 
 #ifdef RPI
+#ifdef RPI_LEGACY
 #include "RPIFbDisplayConsumer.h"
+#else
+#include "KMSDisplayConsumer.h"
+#endif
 #endif
 
 #endif
@@ -34,12 +38,14 @@
 
 #include "argparser.h"
 
+#include <stdexcept>
+
 static bool terminate_flag = false;
 
 static void separator(std::ostream &os) { os << std::endl; }
 
 static progresscpp::ProgressBar initProgressBar(uint32_t limit) {
-  int cols;
+  int cols = 80;
 
 #ifdef _MSC_VER
   CONSOLE_SCREEN_BUFFER_INFO csbi;
@@ -49,11 +55,11 @@ static progresscpp::ProgressBar initProgressBar(uint32_t limit) {
   cols = csbi.srWindow.Right - csbi.srWindow.Left + 1;
 #else
 #ifdef TIOCGSIZE
-  struct ttysize ts;
+  struct ttysize ts{};
   ioctl(STDIN_FILENO, TIOCGSIZE, &ts);
   cols = ts.ts_cols;
 #elif defined(TIOCGWINSZ)
-  struct winsize ts;
+  struct winsize ts{};
   ioctl(STDIN_FILENO, TIOCGWINSZ, &ts);
   cols = ts.ws_col;
 #endif /* TIOCGSIZE */
@@ -74,6 +80,9 @@ static int play(Options &options) {
 #ifdef PLAYER
   if (options.Play()) {
     if (options.rpiMode) {
+#ifndef RPI_LEGACY
+      SDL_SetHint(SDL_HINT_VIDEODRIVER, "kmsdrm");
+#endif
       SDL2DisplayConsumerBase::VideoInit();
       try {
         options.pal = SDL2DisplayConsumerBase::DetectPALNTSC();
@@ -97,6 +106,7 @@ static int play(Options &options) {
         return 1;
       }
     } else {
+      SDL2DisplayConsumerBase::VideoInit();
       if (PlayerConsumer::initSound() != 0) {
         std::cerr << "Failed to initialise sound system!" << std::endl;
         return 1;
@@ -106,6 +116,11 @@ static int play(Options &options) {
 #endif
 
   // --- working pipeline ---
+
+  const auto full_height = PixelDuplicatorStage::FrameHeigth(options.pal, 0, 0);
+  if (static_cast<uint64_t>(options.crop_top) + options.crop_bot >= full_height) {
+    throw std::runtime_error("Cropping must leave at least one video scan line.");
+  }
 
   Splitter<AudioProdusser::AudioPacket> *splitter = nullptr;
   if (options.Play()
@@ -144,12 +159,20 @@ static int play(Options &options) {
     SDL2DisplayConsumerBase *display;
     if (options.rpiMode) {
 #ifdef RPI
+#ifdef RPI_LEGACY
       display = new RPIFbDisplayConsumer(
           options.Rpi_vsync_delay, options.Rpi_left_offset,
           options.Rpi_right_offset, options.Rpi_heigth_mod);
+#else
+      display = new KMSDisplayConsumer(options.Rpi_left_offset,
+          options.Rpi_right_offset, options.Rpi_heigth_mod);
+#endif
+      // Keep ownership if renderer initialization throws.
+      std::unique_ptr<SDL2DisplayConsumerBase> initializing_display(display);
       std::apply(
           [&display](auto &&... args) { display->InitRenderer(args...); },
           SDL2DisplayConsumer::getDisplaySize());
+      initializing_display.release();
 #else
       std::cerr << "No Raspberry Pi support compiled!" << std::endl;
       return 1;
@@ -213,7 +236,7 @@ int main(int argc, char *argv[]) {
 
   {
     auto ret = parseArguments(argc, argv, options);
-    if (ret) {
+    if (ret >= 0) {
       return ret;
     }
   }
@@ -222,7 +245,13 @@ int main(int argc, char *argv[]) {
 
   separator(std::cout);
 
-  auto ret = play(options);
+  int ret;
+  try {
+    ret = play(options);
+  } catch (const std::exception &error) {
+    std::cerr << "Playback/encoding failed: " << error.what() << std::endl;
+    ret = 1;
+  }
 
 #ifdef PLAYER
   if (options.Play() && !options.rpiMode) {
