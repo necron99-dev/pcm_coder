@@ -108,10 +108,19 @@ if (USE_PLAYER)
             list(APPEND PLAY_LIN_SRC RPIFbDisplayConsumer.h RPIFbDisplayConsumer.cpp)
         else()
             list(APPEND PLAY_LIN_SRC KMSDisplayConsumer.h KMSDisplayConsumer.cpp)
+            find_package(PkgConfig REQUIRED)
+            pkg_check_modules(DRM REQUIRED IMPORTED_TARGET libdrm)
+            pkg_check_modules(KMS_SDL REQUIRED sdl2>=2.0.15)
         endif()
     endif()
 
     add_library(playlib STATIC ${PLAY_LIN_SRC})
+
+    if(RPI AND NOT ENABLE_LEGACY_RPI)
+        target_link_libraries(playlib PUBLIC PkgConfig::DRM)
+        # GEM mmap offsets can exceed 4 GiB, including on 32-bit Pi OS.
+        target_compile_definitions(playlib PRIVATE _FILE_OFFSET_BITS=64)
+    endif()
 
     target_link_libraries(playlib
         PUBLIC

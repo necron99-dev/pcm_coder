@@ -167,7 +167,7 @@ static int play(Options &options) {
 #else
       display = new KMSDisplayConsumer(options.Rpi_left_offset,
           options.Rpi_right_offset, options.Rpi_heigth_mod,
-          options.Rpi_display_stats);
+          options.Rpi_display_stats, []() { return terminate_flag; });
 #endif
       // Keep ownership if renderer initialization throws.
       std::unique_ptr<SDL2DisplayConsumerBase> initializing_display(display);

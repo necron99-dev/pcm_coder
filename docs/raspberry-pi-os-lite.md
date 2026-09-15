@@ -4,13 +4,16 @@ Target: Raspberry Pi OS Lite based on Debian 13 (Trixie), with the distribution'
 FFmpeg 7.1 and SDL2 packages. The Pi 3B+ supports both 32-bit and 64-bit images.
 Use a fresh Lite image from Raspberry Pi Imager when moving from an older OS.
 
-The `-R` display path uses SDL2's KMSDRM backend and runs without a desktop.
-It replaces the old dependency on `/opt/vc`, `bcm_host`, and DispmanX.
+The `-R` display path uses SDL2's KMSDRM device/console setup and libdrm
+page-flip events for presentation, without a desktop. It replaces the old
+dependency on `/opt/vc`, `bcm_host`, and DispmanX.
 **Audio playback has been reported working on a Pi 3B+ with an NTSC Sony
 PCM-501ES**, using default 14-bit encoding, `--crop-top 0`, and
 `--left_offset 9`. Zero horizontal offsets previously produced noise.
-This is a listening result for that setup; waveform accuracy, bit-error rate,
-16-bit playback, and other decoder/TV-standard combinations remain unverified.
+That listening result predates the new DRM event-driven presentation path,
+which still needs hardware retesting with the same settings. Waveform accuracy,
+bit-error rate, 16-bit playback, and other decoder/TV-standard combinations
+remain unverified.
 
 ## Build
 
@@ -19,7 +22,7 @@ From the repository directory:
 ```sh
 sudo apt update
 sudo apt install -y build-essential cmake pkg-config git \
-  ffmpeg libsdl2-dev portaudio19-dev \
+  ffmpeg libsdl2-dev libdrm-dev portaudio19-dev \
   libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev \
   libavutil-dev libswresample-dev libswscale-dev
 git submodule update --init --recursive
@@ -40,6 +43,7 @@ File-encoding smoke checks (requires `python3` and `ffmpeg`):
 ```sh
 python3 tests/smoke.py ./build/src/pcm_coder
 python3 tests/pcm_roundtrip.py ./build/src/pcm_coder
+sh tests/kms_scanout.sh
 ```
 
 The round-trip check extracts bits from the generated video, checks every row's
@@ -50,7 +54,7 @@ It does not test the physical signal, the Sony's synchronization and correction
 behavior, or complete EOF flushing.
 
 To build only the file encoder, configure with `-DENABLE_PLAYER=OFF`.
-SDL2 and PortAudio development packages are then unnecessary. File encoding
+SDL2, libdrm, and PortAudio development packages are then unnecessary. File encoding
 works over SSH and needs no display or composite configuration:
 
 ```sh
@@ -110,7 +114,8 @@ SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
 
 The omitted options retain their defaults: 14-bit encoding, P and Q enabled,
 right offset zero, height modifier zero, and no field swap. The inherited value
-of `SDL_VIDEO_DOUBLE_BUFFER` was not recorded for the successful test.
+of `SDL_VIDEO_DOUBLE_BUFFER` was not recorded for that earlier successful test.
+The current direct DRM presentation path does not use this SDL hint.
 
 `-R` selects KMSDRM automatically unless an SDL driver is explicitly set in
 the environment. It detects PAL/NTSC from display dimensions, so do not combine
@@ -125,9 +130,30 @@ the image upward and does not stretch the remaining lines. `--left_offset`
 and `--right_offset` set horizontal margins. Leave `--heigth_mod` at zero
 unless deliberately experimenting with vertical scaling.
 
-The renderer requests vsync and paces complete PCM images at 25 fps (PAL) or
-30000/1001 fps (NTSC). SDL does not expose field parity here, so this path
-does not guarantee the legacy DispmanX callback's field phase.
+The player allocates two DRM scanout buffers and preserves the active interlaced
+composite mode. It first displays black, measures vblank spacing, and anchors
+its relative frame phase to a completed page flip. It prepares the next image
+in the free buffer, queues a synchronized flip, and waits for the kernel's
+completion event before reusing the previous buffer. There is no sleep-based
+frame clock and no SDL renderer on this path.
+
+When the driver reports one vblank per field, the player submits during the
+intervening field to keep successive flips on the same relative phase, two
+ticks apart. With one vblank per complete frame, it queues the next flip
+directly, including drivers whose counter advances by two at each frame event.
+Late production can repeat a complete image; it does not trigger
+catch-up bursts. Repeats are reported because they can cause audible errors.
+A flip that completes on an unexpected phase stops playback. The legacy flip
+API cannot guarantee a target sequence if scheduling misses the boundary;
+the completion check detects that failure after it happens.
+
+DRM event sequence/timestamps do **not** label the physical odd/even field.
+This establishes a repeatable phase relative to the first flip within a run,
+not a verified analogue field identity across runs. Keep the known working
+field arrangement initially; `--swap-fields` remains a separate raster-order
+diagnostic. Hardware measurement is still required to prove field identity.
+See the [DRM event interface](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/include/uapi/drm/drm.h)
+and [VC4 flip completion handling](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/drivers/gpu/drm/vc4/vc4_crtc.c).
 
 ## Diagnose noise or timing problems
 
@@ -171,22 +197,22 @@ timing still need investigation.
 To collect presentation timing measurements, run:
 
 ```sh
-SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 SDL_VIDEO_DOUBLE_BUFFER=1 \
+SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
   ./build/src/pcm_coder -R --14 --crop-top 0 --left_offset 9 --display-stats input.wav
 ```
 
-Keep it running for at least 20 seconds and record the `KMS geometry` and
-`KMS timing` lines. The report shows SDL presentation-return frequency and
-the minimum/maximum gaps over each five-second window. `short` and `long`
-count intervals below 75% or above 125% of the target frame period, respectively.
-NTSC's target is about 33.367 ms per complete image; PAL's is 40 ms.
-This can reveal irregular pacing, but it does not measure the analogue field
-phase or prove that every submitted image was displayed correctly.
+Keep it running for at least 20 seconds and record the `KMS sync`, `KMS geometry`,
+and `KMS timing` lines. Startup reports the measured vblank ticks per image
+and initial flip sequence. Timing reports use completed DRM flip timestamps,
+with minimum/maximum gaps and repeated images over each five-second window.
+NTSC should average about 29.970 flips/s with 33.367 ms gaps; PAL should be
+25 flips/s with 40 ms gaps. These are kernel reports, not analogue measurements.
 
-`SDL_VIDEO_DOUBLE_BUFFER=1` makes the SDL KMS backend wait for completion of
-the submitted page flip before returning (after initial setup), so these
-measurements are more useful than with a pending flip. See the
-[SDL implementation](https://github.com/libsdl-org/SDL/blob/release-2.32.4/src/video/kmsdrm/SDL_kmsdrmopengles.c).
+If startup rejects the cadence or playback reports lost frame phase, preserve
+the error and startup output. Do not try to compensate by changing crop or
+offsets: those settings change image geometry, not event timing. The player
+uses bounded waits and restores the console on exit, including errors and
+Ctrl+C. `SDL_VIDEO_DOUBLE_BUFFER` no longer affects `-R` presentation.
 
 For a controlled field-order comparison, repeat the same playback command with
 `--swap-fields` added:

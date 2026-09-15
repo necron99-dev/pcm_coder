@@ -1,124 +1,319 @@
 #include "KMSDisplayConsumer.h"
+#include "KMSTiming.h"
 
-#include <memory>
-#include <algorithm>
+#include <SDL2/SDL_syswm.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+#include <drm_fourcc.h>
+#include <sys/mman.h>
+#include <poll.h>
+
+#include <array>
+#include <cerrno>
+#include <chrono>
+#include <climits>
+#include <cmath>
 #include <cstdio>
-#include <stdexcept>
+#include <cstring>
+#include <limits>
 #include <string>
-#include <thread>
 
 namespace {
-void checkSDL(int result, const char *operation) {
-  if (result < 0) {
-    throw std::runtime_error(std::string(operation) + ": " + SDL_GetError());
-  }
+void checkDRM(int result, const char *operation) {
+  if (result < 0)
+    throw std::runtime_error(std::string(operation) + ": " + std::strerror(errno));
 }
 }
 
+struct KMSDisplayConsumer::Scanout {
+  struct Buffer {
+    uint32_t handle = 0, fb = 0, pitch = 0;
+    uint64_t size = 0;
+    void *map = MAP_FAILED;
+  };
+  int fd = -1; // Borrowed from SDL; never close it here.
+  drmModeCrtc *saved = nullptr;
+  uint32_t connector = 0, pipe = 0;
+  std::array<Buffer, 2> buffers{};
+  int front = 0;
+  bool changed = false, pending = false, have_pcm = false;
+  bool field_events = false;
+  kms::Stamp event{}, last_flip{};
+  unsigned ticks = 0;
+  double frame_us = 0;
+  std::function<bool()> stopping;
+  uint64_t stats_start = 0;
+  unsigned intervals = 0, repeats = 0;
+  double min_ms = std::numeric_limits<double>::max(), max_ms = 0;
+
+  static void onEvent(int, unsigned sequence, unsigned sec, unsigned usec,
+                      void *data) {
+    auto &self = *static_cast<Scanout *>(data);
+    self.event = {sequence, uint64_t(sec) * 1000000 + usec};
+    self.pending = false;
+  }
+
+  bool wait(bool cancellable = true) {
+    drmEventContext context{};
+    context.version = 2;
+    context.vblank_handler = onEvent;
+    context.page_flip_handler = onEvent;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (pending) {
+      if (cancellable && stopping && stopping()) return false;
+      if (std::chrono::steady_clock::now() >= deadline)
+        throw std::runtime_error("Timed out waiting for DRM scanout event.");
+      pollfd pfd{fd, POLLIN, 0};
+      const int ret = poll(&pfd, 1, 50);
+      if (ret < 0 && errno == EINTR) continue;
+      checkDRM(ret, "poll DRM");
+      if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))
+        throw std::runtime_error("DRM device became unavailable.");
+      if (pfd.revents & POLLIN)
+        checkDRM(drmHandleEvent(fd, &context), "drmHandleEvent");
+    }
+    return true;
+  }
+
+  drmVBlank request(uint32_t sequence, bool relative, bool notify) {
+    drmVBlank vblank{};
+    vblank.request.type = static_cast<drmVBlankSeqType>(
+        (relative ? DRM_VBLANK_RELATIVE : DRM_VBLANK_ABSOLUTE) |
+        (notify ? DRM_VBLANK_EVENT : 0) |
+        ((pipe << DRM_VBLANK_HIGH_CRTC_SHIFT) & DRM_VBLANK_HIGH_CRTC_MASK));
+    vblank.request.sequence = sequence;
+    vblank.request.signal = notify ? reinterpret_cast<unsigned long>(this) : 0;
+    checkDRM(drmWaitVBlank(fd, &vblank), "drmWaitVBlank");
+    return vblank;
+  }
+
+  uint32_t currentTick() { return request(0, true, false).reply.sequence; }
+
+  bool waitTick(uint32_t target, bool cancellable = true) {
+    request(target, false, true);
+    pending = true;
+    return wait(cancellable);
+  }
+
+  bool flip(int next) {
+    checkDRM(drmModePageFlip(fd, saved->crtc_id, buffers[next].fb,
+                           DRM_MODE_PAGE_FLIP_EVENT, this), "drmModePageFlip");
+    pending = true;
+    if (!wait()) return false;
+    front = next; // The previous front buffer is now safe to write.
+    return true;
+  }
+
+  void allocate(Buffer &buffer, int width, int height) {
+    drm_mode_create_dumb create{};
+    create.width = width;
+    create.height = height;
+    create.bpp = 32;
+    checkDRM(drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &create), "CREATE_DUMB");
+    buffer.handle = create.handle;
+    buffer.pitch = create.pitch;
+    buffer.size = create.size;
+    uint32_t handles[4]{buffer.handle}, pitches[4]{buffer.pitch}, offsets[4]{};
+    checkDRM(drmModeAddFB2(fd, width, height, DRM_FORMAT_XRGB8888,
+                         handles, pitches, offsets, &buffer.fb, 0), "drmModeAddFB2");
+    drm_mode_map_dumb map{};
+    map.handle = buffer.handle;
+    checkDRM(drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &map), "MAP_DUMB");
+    buffer.map = mmap(nullptr, buffer.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, map.offset);
+    if (buffer.map == MAP_FAILED) checkDRM(-1, "mmap scanout buffer");
+    std::memset(buffer.map, 0, buffer.size);
+  }
+
+  void initialize(int width, int height) {
+    std::unique_ptr<drmModeRes, decltype(&drmModeFreeResources)> resources(
+        drmModeGetResources(fd), drmModeFreeResources);
+    if (!resources) checkDRM(-1, "drmModeGetResources");
+    for (int i = 0; i < resources->count_connectors; ++i) {
+      std::unique_ptr<drmModeConnector, decltype(&drmModeFreeConnector)> conn(
+          drmModeGetConnector(fd, resources->connectors[i]), drmModeFreeConnector);
+      if (!conn || conn->connector_type != DRM_MODE_CONNECTOR_Composite ||
+          conn->connection != DRM_MODE_CONNECTED || !conn->encoder_id) continue;
+      std::unique_ptr<drmModeEncoder, decltype(&drmModeFreeEncoder)> encoder(
+          drmModeGetEncoder(fd, conn->encoder_id), drmModeFreeEncoder);
+      if (!encoder || !encoder->crtc_id) continue;
+      saved = drmModeGetCrtc(fd, encoder->crtc_id);
+      connector = conn->connector_id;
+      break;
+    }
+    if (!saved || !saved->mode_valid)
+      throw std::runtime_error("DRM requires an active Composite connector and CRTC.");
+    const auto &mode = saved->mode;
+    if (!(mode.flags & DRM_MODE_FLAG_INTERLACE) || mode.hdisplay != width ||
+        mode.vdisplay != height || width != 720 || (height != 480 && height != 576))
+      throw std::runtime_error("DRM composite must use the boot-selected 720x480i or 720x576i mode.");
+    if (!mode.clock || !mode.htotal || !mode.vtotal || mode.vscan > 1 ||
+        (mode.flags & DRM_MODE_FLAG_DBLSCAN))
+      throw std::runtime_error("Unsupported DRM composite timing.");
+    frame_us = 1000.0 * mode.htotal * mode.vtotal / mode.clock;
+    const double expected = height == 576 ? 40000.0 : 100100.0 / 3.0;
+    if (std::abs(frame_us - expected) > expected * .01)
+      throw std::runtime_error("Composite refresh does not match PAL/NTSC PCM timing.");
+    bool found = false;
+    for (int i = 0; i < resources->count_crtcs; ++i) {
+      if (resources->crtcs[i] == saved->crtc_id) { pipe = i; found = true; break; }
+    }
+    if (!found) throw std::runtime_error("Cannot find composite CRTC index.");
+    for (auto &buffer : buffers) allocate(buffer, width, height);
+    checkDRM(drmModeSetCrtc(fd, saved->crtc_id, buffers[0].fb, 0, 0,
+                          &connector, 1, &saved->mode), "drmModeSetCrtc");
+    changed = true;
+
+    // Measure actual kernel event spacing while displaying black. A nominal
+    // 60 Hz mode can expose field or frame events; do not guess from its name.
+    std::vector<double> samples;
+    unsigned smallest_step = UINT_MAX;
+    if (!waitTick(currentTick() + 1)) return;
+    auto previous = event;
+    for (unsigned i = 0; i < 8; ++i) {
+      if (!waitTick(currentTick() + 1)) return;
+      const int32_t delta = kms::distance(event.sequence, previous.sequence);
+      if (delta <= 0 || event.us <= previous.us)
+        throw std::runtime_error("Invalid DRM vblank calibration timestamps.");
+      samples.push_back(double(event.us - previous.us) / delta);
+      smallest_step = std::min(smallest_step, static_cast<unsigned>(delta));
+      previous = event;
+    }
+    ticks = kms::ticksPerFrame(samples, frame_us);
+    // Some drivers count fields but deliver events only once per full frame.
+    // Waiting for an intermediate field on those drivers would halve playback.
+    if (smallest_step > ticks)
+      throw std::runtime_error("DRM calibration could not observe a complete frame interval.");
+    field_events = ticks == 2 && smallest_step == 1;
+    // An actual completed flip is the phase anchor, not a wall-clock epoch.
+    if (!flip(1)) return;
+    last_flip = event;
+    std::fprintf(stderr,
+        "\nKMS sync: %ux%u interlaced, %.3f ms/image, %u vblank ticks/image; "
+        "events=%s; flip anchor=%u. Physical odd/even field is not reported by DRM.\n",
+        mode.hdisplay, mode.vdisplay, frame_us / 1000, ticks,
+        field_events ? "field" : "frame", last_flip.sequence);
+  }
+
+  void report(kms::Stamp previous, unsigned frames, bool enabled) {
+    if (frames > 1)
+      std::fprintf(stderr, "\nKMS underrun: repeated the previous image for %u extra frame(s).\n", frames - 1);
+    if (!enabled) return;
+    if (!stats_start) stats_start = previous.us;
+    const double gap = (event.us - previous.us) / 1000.0;
+    min_ms = std::min(min_ms, gap);
+    max_ms = std::max(max_ms, gap);
+    ++intervals;
+    repeats += frames - 1;
+    const double elapsed = (event.us - stats_start) / 1000000.0;
+    if (elapsed >= 5) {
+      std::fprintf(stderr,
+          "\nKMS timing: %.3f completed flips/s; gap min=%.3f max=%.3f ms; "
+          "repeated=%u; sequence=%u timestamp=%llu us\n",
+          intervals / elapsed, min_ms, max_ms, repeats, event.sequence,
+          static_cast<unsigned long long>(event.us));
+      stats_start = event.us;
+      intervals = repeats = 0;
+      min_ms = std::numeric_limits<double>::max(); max_ms = 0;
+    }
+  }
+
+  ~Scanout() {
+    if (fd < 0) return;
+    try {
+      if (pending) wait(false);
+      // Let the last PCM image finish scanning before restoring the console.
+      if (have_pcm && ticks && !(stopping && stopping()) &&
+          kms::distance(currentTick(), last_flip.sequence + ticks) < 0)
+        waitTick(last_flip.sequence + ticks, false);
+    } catch (const std::exception &error) {
+      std::fprintf(stderr, "\nDRM cleanup: %s\n", error.what());
+    }
+    if (changed && drmModeSetCrtc(fd, saved->crtc_id, saved->buffer_id,
+                                 saved->x, saved->y, &connector, 1, &saved->mode) < 0)
+      std::fprintf(stderr, "\nCould not restore DRM CRTC: %s\n", std::strerror(errno));
+    for (auto &buffer : buffers) {
+      if (buffer.fb) drmModeRmFB(fd, buffer.fb);
+      if (buffer.map != MAP_FAILED) munmap(buffer.map, buffer.size);
+      if (buffer.handle) {
+        drm_mode_destroy_dumb destroy{};
+        destroy.handle = buffer.handle;
+        drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy);
+      }
+    }
+    if (saved) drmModeFreeCrtc(saved);
+  }
+};
+
 KMSDisplayConsumer::KMSDisplayConsumer(int left_offset, int right_offset,
-                                     int height_mod, bool display_stats)
+                                     int height_mod, bool display_stats,
+                                     std::function<bool()> stopping)
     : left_offset(left_offset), right_offset(right_offset), height_mod(height_mod),
-      display_stats(display_stats) {}
+      display_stats(display_stats), stopping(std::move(stopping)) {}
+
+KMSDisplayConsumer::~KMSDisplayConsumer() = default;
 
 void KMSDisplayConsumer::InitRenderer(int width, int height) {
   const char *driver = SDL_GetCurrentVideoDriver();
-  if (!driver || std::string(driver) != "KMSDRM") {
-    throw std::runtime_error("Raspberry Pi playback requires SDL_VIDEODRIVER=kmsdrm from a local console.");
-  }
+  if (!driver || std::string(driver) != "KMSDRM")
+    throw std::runtime_error("Raspberry Pi playback requires SDL_VIDEODRIVER=kmsdrm.");
   this->width = width;
   this->heigth = height;
   if (left_offset < 0 || right_offset < 0 ||
-      static_cast<int64_t>(left_offset) + right_offset >= width) {
+      static_cast<int64_t>(left_offset) + right_offset >= width)
     throw std::runtime_error("Left and right offsets must leave a positive display width.");
-  }
-
-  // Preserve the boot-selected interlaced mode. Fullscreen desktop avoids
-  // SDL selecting a different mode with matching dimensions.
-  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
   window = SDL_CreateWindow("PCM", SDL_WINDOWPOS_UNDEFINED_DISPLAY(0),
                             SDL_WINDOWPOS_UNDEFINED_DISPLAY(0), width, height,
                             SDL_WINDOW_FULLSCREEN_DESKTOP);
-  if (!window) {
+  if (!window)
     throw std::runtime_error(std::string("SDL_CreateWindow: ") + SDL_GetError());
-  }
-  renderer = SDL_CreateRenderer(window, -1,
-      SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
-  if (!renderer) {
-    throw std::runtime_error(std::string("SDL_CreateRenderer: ") + SDL_GetError());
-  }
   SDL_ShowCursor(SDL_DISABLE);
-  checkSDL(SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255), "SDL_SetRenderDrawColor");
-  // Each PCM image contains both fields: 25 PAL or 30000/1001 NTSC images/s.
-  // Explicit pacing also covers drivers whose vsync is reported per field.
-  frame_period = height == 576 ? std::chrono::nanoseconds(40000000)
-                               : std::chrono::nanoseconds(33366667);
-  next_frame = std::chrono::steady_clock::now();
+  SDL_SysWMinfo info{};
+  SDL_VERSION(&info.version);
+  if (!SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_KMSDRM)
+    throw std::runtime_error(std::string("SDL KMS device access: ") + SDL_GetError());
+  scanout = std::make_unique<Scanout>();
+  scanout->fd = info.info.kmsdrm.drm_fd;
+  scanout->stopping = stopping;
+  if (scanout->fd < 0) throw std::runtime_error("SDL did not supply a DRM file descriptor.");
+  scanout->initialize(width, height);
 }
 
 void KMSDisplayConsumer::renderFrame(const IFrame &frame) {
+  if (stopping && stopping()) return;
+  auto &out = *scanout;
   auto pixels = frame.render();
-  // Use the actual cropped source height, never the display height, as the
-  // buffer extent. Vertical scaling would move PCM data between scan lines.
-  std::unique_ptr<SDL_Surface, decltype(&SDL_FreeSurface)> surface(
-      SDL_CreateRGBSurfaceFrom(pixels.pixels.data(), frame.width(), frame.heigth(),
-                               8, frame.width(), 0, 0, 0, 0), SDL_FreeSurface);
-  if (!surface) {
-    throw std::runtime_error(std::string("SDL_CreateRGBSurfaceFrom: ") + SDL_GetError());
-  }
-  checkSDL(SDL_SetSurfacePalette(surface.get(), palete), "SDL_SetSurfacePalette");
-  std::unique_ptr<SDL_Texture, decltype(&SDL_DestroyTexture)> texture(
-      SDL_CreateTextureFromSurface(renderer, surface.get()), SDL_DestroyTexture);
-  if (!texture) {
-    throw std::runtime_error(std::string("SDL_CreateTextureFromSurface: ") + SDL_GetError());
-  }
   const int64_t dest_height = static_cast<int64_t>(frame.heigth()) + height_mod;
-  if (dest_height <= 0 || dest_height > INT32_MAX) {
+  if (frame.width() <= 0 || frame.heigth() <= 0 || dest_height <= 0 || dest_height > INT32_MAX)
     throw std::runtime_error("Height modifier must leave a valid positive frame height.");
+  const int dest_width = width - left_offset - right_offset;
+  const int next = 1 - out.front;
+  auto &buffer = out.buffers[next];
+  std::memset(buffer.map, 0, buffer.size);
+  // Nearest-neighbour pixel-centre sampling matches the former SDL texture.
+  // No vertical rescaling unless explicitly requested with --heigth_mod.
+  std::array<int, 720> source_x{};
+  for (int x = 0; x < dest_width; ++x)
+    source_x[x] = (int64_t(2 * x + 1) * frame.width()) / (2 * dest_width);
+  for (int y = 0; y < std::min<int64_t>(heigth, dest_height); ++y) {
+    const int sy = (int64_t(2 * y + 1) * frame.heigth()) / (2 * dest_height);
+    auto *row = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(buffer.map) + y * buffer.pitch);
+    for (int x = 0; x < dest_width; ++x) {
+      const uint32_t value = pixels.pixels[size_t(sy) * frame.width() + source_x[x]];
+      row[left_offset + x] = value * 0x010101u;
+    }
   }
-  SDL_Rect dest{left_offset, 0, width - left_offset - right_offset,
-                static_cast<int>(dest_height)};
-  if (display_stats && !stats_started) {
-    const char *double_buffer = SDL_GetHint(SDL_HINT_VIDEO_DOUBLE_BUFFER);
-    std::fprintf(stderr, "\nKMS geometry: source=%dx%d, draw=%dx%d+%d+%d, screen=%dx%d; double-buffer hint=%s\n",
-        frame.width(), frame.heigth(), dest.w, dest.h, dest.x, dest.y,
-        width, heigth, double_buffer ? double_buffer : "unset");
-  }
-  checkSDL(SDL_RenderClear(renderer), "SDL_RenderClear");
-  checkSDL(SDL_RenderCopy(renderer, texture.get(), nullptr, &dest), "SDL_RenderCopy");
-  std::this_thread::sleep_until(next_frame);
-  SDL_RenderPresent(renderer);
-  next_frame += frame_period;
-  const auto now = std::chrono::steady_clock::now();
-  if (display_stats) {
-    reportPresent(now);
-  }
-  // Do not burst frames when decoding falls behind the output clock.
-  if (next_frame < now) {
-    next_frame = now;
-  }
-}
+  if (display_stats && !out.have_pcm)
+    std::fprintf(stderr, "\nKMS geometry: source=%dx%d, draw=%dx%lld+%d+0, screen=%dx%d\n",
+        frame.width(), frame.heigth(), dest_width, static_cast<long long>(dest_height),
+        left_offset, width, heigth);
 
-void KMSDisplayConsumer::reportPresent(std::chrono::steady_clock::time_point now) {
-  if (!stats_started) {
-    stats_start = previous_present = now;
-    stats_started = true;
-    return;
-  }
-  const double gap = std::chrono::duration<double, std::milli>(now - previous_present).count();
-  const double target = std::chrono::duration<double, std::milli>(frame_period).count();
-  previous_present = now;
-  ++intervals;
-  min_gap_ms = intervals == 1 ? gap : std::min(min_gap_ms, gap);
-  max_gap_ms = intervals == 1 ? gap : std::max(max_gap_ms, gap);
-  short_intervals += gap < target * 0.75;
-  long_intervals += gap > target * 1.25;
-  const double elapsed = std::chrono::duration<double>(now - stats_start).count();
-  if (elapsed >= 5.0) {
-    // These are SDL call-return times, not measured analogue field timestamps.
-    std::fprintf(stderr, "\nKMS timing: %.3f present returns/s; gap min=%.3f max=%.3f ms; target=%.3f ms; short=%u long=%u of %u\n",
-        intervals / elapsed, min_gap_ms, max_gap_ms, target,
-        short_intervals, long_intervals, intervals);
-    stats_start = now;
-    intervals = short_intervals = long_intervals = 0;
-  }
+  const uint32_t now = out.currentTick();
+  const uint32_t submit = out.field_events
+      ? kms::submissionTick(out.last_flip.sequence, now, out.ticks) : now;
+  if (kms::distance(submit, now) > 0 && !out.waitTick(submit)) return;
+  if (!out.flip(next)) return;
+  const unsigned frames = kms::completedFrames(out.last_flip, out.event, out.ticks, out.frame_us);
+  if (out.have_pcm) out.report(out.last_flip, frames, display_stats);
+  out.last_flip = out.event;
+  out.have_pcm = true;
 }

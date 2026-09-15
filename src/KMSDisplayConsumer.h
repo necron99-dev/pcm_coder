@@ -1,25 +1,22 @@
 #pragma once
 
-#include <chrono>
+#include <memory>
 #include "SDL2DisplayConsumerBase.h"
 
-// SDL owns DRM/KMS and EGL; no Raspberry Pi firmware libraries are needed.
+// SDL owns the device/console; this consumer owns scanout and DRM events.
+// Never create an SDL renderer or swap its window on this path.
 struct KMSDisplayConsumer : public SDL2DisplayConsumerBase {
   KMSDisplayConsumer(int left_offset, int right_offset, int height_mod,
-                     bool display_stats = false);
+                     bool display_stats = false,
+                     std::function<bool()> stopping = {});
+  ~KMSDisplayConsumer() override;
   void InitRenderer(int width, int height) override;
-
 protected:
   void renderFrame(const IFrame &frame) override;
-
 private:
+  struct Scanout;
+  std::unique_ptr<Scanout> scanout;
   int left_offset, right_offset, height_mod;
-  std::chrono::steady_clock::time_point next_frame{};
-  std::chrono::nanoseconds frame_period{};
-  bool display_stats, stats_started = false;
-  std::chrono::steady_clock::time_point stats_start{}, previous_present{};
-  unsigned intervals = 0, short_intervals = 0, long_intervals = 0;
-  double min_gap_ms = 0, max_gap_ms = 0;
-
-  void reportPresent(std::chrono::steady_clock::time_point now);
+  bool display_stats;
+  std::function<bool()> stopping;
 };

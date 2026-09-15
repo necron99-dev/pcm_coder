@@ -107,7 +107,7 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
       ->needs(rpi_mode);
 #else
   newFlag(app, "--display-stats", options.Rpi_display_stats,
-          "Report SDL presentation intervals every five seconds (diagnostic).")
+          "Report DRM page-flip timestamps and repeated frames every five seconds.")
       ->needs(rpi_mode);
 #endif
   newOption(app, "--left_offset", options.Rpi_left_offset, "RPI left offet.")

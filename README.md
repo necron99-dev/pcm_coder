@@ -10,9 +10,10 @@ boot configuration, playback, and troubleshooting.
 
 **KMS composite playback has been reported working on a Pi 3B+ with an NTSC
 Sony PCM-501ES**, using default 14-bit encoding and `--left_offset 9`.
-The command below records that setup. Other decoder/TV-standard combinations
-still need hardware validation; builds and file checks also run in a Debian
-Trixie container.
+That listening result used the earlier SDL presentation path. The current
+DRM event-driven presentation path preserves those geometry settings but still
+needs a Pi/Sony hardware retest. Builds and file checks run in a Debian Trixie
+container.
 
 ## Features
 
@@ -27,7 +28,8 @@ Trixie container.
 ## Build on Raspberry Pi OS Lite or Debian Linux
 
 You need Git, CMake 3.16 or newer, a C++17 compiler, and FFmpeg development
-libraries. Playback also requires SDL2 and PortAudio. The compatibility checks
+libraries. Playback also requires SDL2 (2.0.15 or newer), libdrm on Linux,
+and PortAudio. The compatibility checks
 used GCC 14, FFmpeg 7.1, and SDL2 2.32 on Debian Trixie.
 
 Install dependencies:
@@ -35,7 +37,7 @@ Install dependencies:
 ```sh
 sudo apt update
 sudo apt install -y build-essential cmake pkg-config git \
-  ffmpeg libsdl2-dev portaudio19-dev \
+  ffmpeg libsdl2-dev libdrm-dev portaudio19-dev \
   libavcodec-dev libavformat-dev libavdevice-dev libavfilter-dev \
   libavutil-dev libswresample-dev libswscale-dev
 ```
@@ -75,7 +77,7 @@ After installation, you can use `pcm_coder` directly.
 ### Build only the file encoder
 
 File encoding works over SSH without a display. To disable playback, omit
-`libsdl2-dev` and `portaudio19-dev` from the dependency installation and build
+`libsdl2-dev`, `libdrm-dev`, and `portaudio19-dev` from the dependency installation and build
 with:
 
 ```sh
@@ -134,7 +136,10 @@ This uses 14-bit encoding, P/Q correction, a zero right offset, and no field
 swap. On a 720-pixel display, the left offset both shifts the image and narrows
 it to 711 pixels. The KMS backend preserves vertical scan lines when cropping
 and clips at the display edges. See the setup guide for test limitations,
-diagnostics, and console/SSH display access.
+diagnostics, and console/SSH display access. Presentation waits for DRM
+page-flip completion and follows measured vblank events instead of a software
+timer. Each completed flip is checked against the established relative frame
+phase; DRM does not identify physical odd/even fields.
 
 ### Preview on a desktop
 
@@ -155,7 +160,7 @@ console.
 | `--pal` / `--ntsc` | Select the video standard for encoding or desktop preview. |
 | `--14` / `--16` | Select the PCM audio bit width. |
 | `--swap-fields` | Exchange the PCM image fields before cropping, for field-order diagnostics. |
-| `--display-stats` | Report image geometry and SDL presentation intervals in KMS Pi mode. |
+| `--display-stats` | Report geometry, DRM flip timestamps, and repeated frames in KMS Pi mode. |
 | `--no-dither` | Disable dithering when converting to 14-bit audio. |
 | `--no-parity` | Disable parity generation. |
 | `--no-q` | Disable Q generation in 14-bit mode. |
@@ -179,7 +184,14 @@ Python 3 and the `ffmpeg` command-line tools:
 ```sh
 sudo apt install -y python3
 python3 tests/smoke.py ./build/src/pcm_coder
+python3 tests/pcm_roundtrip.py ./build/src/pcm_coder
+sh tests/kms_scanout.sh
 ```
+
+The DRM test compiles a simulated device around the actual display consumer.
+It checks PAL/NTSC cadence, field/frame event rates, sequence wraparound, late
+frames, phase-loss rejection, raster geometry, cancellation, and resource cleanup.
+It requires the SDL2 and libdrm development packages.
 
 These checks run without display hardware and do not verify composite output
 or hardware PCM decoding.
