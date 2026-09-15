@@ -19,16 +19,15 @@ struct Allocation { uint64_t offset, size; uint32_t pitch; };
 std::map<uint32_t, Allocation> allocations;
 uint32_t connector_id = 31, crtc_id = 42, sequence, next_handle, front_fb;
 uint64_t timestamp, next_offset;
-unsigned event_ticks, counter_stride, delayed_flip, create_failure, scanout_parity;
+unsigned event_ticks, counter_stride, delayed_flip, create_failure;
 bool pending, page_flip, restored, cancel_playback;
 void *event_data;
 FILE *backing;
 std::vector<uint32_t> flips;
-std::vector<std::vector<uint32_t>> captured_fields;
 drmModeModeInfo mode;
 
 void reset(unsigned ticks, bool pal = false) {
-  allocations.clear(); flips.clear(); captured_fields.clear(); scanout_parity = 0;
+  allocations.clear(); flips.clear();
   sequence = UINT32_MAX - 12; timestamp = 1000000;
   next_handle = 1; next_offset = 0; front_fb = 99;
   event_ticks = ticks; counter_stride = 1; delayed_flip = create_failure = 0;
@@ -43,7 +42,6 @@ void reset(unsigned ticks, bool pal = false) {
 }
 void advance(unsigned delta) {
   sequence += delta;
-  if (event_ticks >= 2) scanout_parity ^= (delta / (event_ticks / 2)) & 1u;
   const double frame_us = 1000.0 * mode.htotal * mode.vtotal / mode.clock;
   timestamp += static_cast<uint64_t>(delta * frame_us / event_ticks);
 }
@@ -57,13 +55,12 @@ struct TestDisplay : KMSDisplayConsumer {
   using KMSDisplayConsumer::renderFrame;
 };
 struct Pattern : IFrame {
-  int seed;
-  Pattern(int height = 525, int seed = 0) : IFrame(139, height), seed(seed) {}
+  Pattern(int height = 525) : IFrame(139, height) {}
   bool Eof() const override { return false; }
   PixelContainer render(uint8_t, uint8_t) const override {
     PixelContainer p(width(), heigth());
     for (int y = 0; y < heigth(); ++y)
-      for (int x = 0; x < width(); ++x) p.pixels[y * width() + x] = (x + 3 * y + seed) % 256;
+      for (int x = 0; x < width(); ++x) p.pixels[y * width() + x] = (x + 3 * y) % 256;
     return p;
   }
 };
@@ -150,17 +147,6 @@ int drmModePageFlip(int, uint32_t, uint32_t fb, uint32_t flags, void *data) {
   assert(flags == DRM_MODE_PAGE_FLIP_EVENT);
   advance(counter_stride + delayed_flip); delayed_flip = 0;
   front_fb = fb; flips.push_back(sequence);
-  // Observe only the physical field selected by the simulated scanout engine.
-  // Its parity is independent of DRM sequence numbering and initial phase.
-  const auto &a = allocations.at(fb);
-  std::vector<uint32_t> captured;
-  std::vector<uint32_t> row(mode.hdisplay);
-  for (unsigned y = scanout_parity; y < mode.vdisplay; y += 2) {
-    assert(pread(fileno(backing), row.data(), row.size() * sizeof(uint32_t),
-                 a.offset + y * a.pitch) == ssize_t(row.size() * sizeof(uint32_t)));
-    captured.insert(captured.end(), row.begin(), row.end());
-  }
-  captured_fields.push_back(std::move(captured));
   pending = page_flip = true; event_data = data; return 0;
 }
 int drmHandleEvent(int fd, drmEventContextPtr context) {
@@ -171,60 +157,28 @@ int drmHandleEvent(int fd, drmEventContextPtr context) {
 }
 }
 
-void checkCapturedField(size_t capture, unsigned logical_field, int seed) {
-  const auto &pixels = captured_fields.at(capture);
-  for (unsigned line = 0; line < mode.vdisplay / 2; ++line) {
-    const unsigned source_row = 2 * line + logical_field;
-    for (unsigned x = 0; x < 720; ++x) {
-      const unsigned sx = x < 9 ? 0 : unsigned(((x - 9) + .5) / 711.0 * 139);
-      const unsigned value = x < 9 ? 0 : (sx + 3 * source_row + seed) % 256;
-      assert(pixels.at(line * 720 + x) == value * 0x010101u);
-    }
-  }
-}
-
 int main() {
-  // Both initial physical parities must emit the same chronological PCM fields.
-  // Exercise standard counters and the Pi's doubled software counters, PAL/NTSC.
-  for (bool pal : {false, true}) for (unsigned ticks : {2u, 4u})
-  for (unsigned initial_parity : {0u, 1u}) {
+  for (bool pal : {false, true}) for (unsigned ticks : {1u, 2u, 4u}) {
     reset(ticks, pal);
-    counter_stride = ticks / 2;
-    scanout_parity = initial_parity;
+    if (ticks == 4) counter_stride = 2; // Two counts for each physical field.
     {
       TestDisplay display(9, 0, 0);
       display.InitRenderer(720, mode.vdisplay);
-      const int height = pal ? 625 : 525;
-      for (int i = 0; i < 5; ++i) display.renderFrame(Pattern(height, i * 17));
-      assert(flips.size() == 11); // Black anchor followed by 10 PCM fields.
-      for (size_t i = 1; i < flips.size(); ++i) {
-        assert(kms::distance(flips[i], flips[i - 1]) == int(counter_stride));
-        checkCapturedField(i, (i - 1) % 2, ((i - 1) / 2) * 17);
-      }
-      // A late producer can repeat a field, but cannot reverse subsequent fields.
-      advance(3 * ticks);
-      display.renderFrame(Pattern(height, 111));
-      assert(kms::distance(flips[11], flips[10]) == int(3 * ticks + counter_stride));
-      assert(kms::distance(flips[12], flips[11]) == int(counter_stride));
-      checkCapturedField(11, 0, 111);
-      checkCapturedField(12, 1, 111);
-    }
-    assert(restored); checkClean();
-  }
-  // Drivers that expose only full-frame events retain a normal interlaced image.
-  for (bool pal : {false, true}) for (unsigned ticks : {1u, 2u, 4u}) {
-    reset(ticks, pal); counter_stride = ticks;
-    {
-      TestDisplay display(9, 0, 0); display.InitRenderer(720, mode.vdisplay);
-      for (int i = 0; i < 5; ++i) display.renderFrame(Pattern(pal ? 625 : 525));
+      Pattern frame(pal ? 625 : 525);
+      for (int i = 0; i < 5; ++i) display.renderFrame(frame);
       assert(flips.size() == 6);
       for (size_t i = 1; i < flips.size(); ++i)
         assert(kms::distance(flips[i], flips[i - 1]) == int(ticks));
+      // Late production repeats complete images, preserving the anchor phase.
+      advance(3 * ticks);
+      display.renderFrame(frame);
+      assert(kms::distance(flips.back(), flips[flips.size() - 2]) == int(4 * ticks));
       const auto &a = allocations.at(front_fb);
       std::vector<uint32_t> row(a.pitch / 4);
       for (int y : {0, 1, 18, 200, int(mode.vdisplay) - 1}) {
         assert(pread(fileno(backing), row.data(), a.pitch, a.offset + y * a.pitch) == a.pitch);
         for (int x = 0; x < 720; ++x) {
+          // Independently evaluate source coordinates at destination centres.
           const unsigned sx = x < 9 ? 0 : unsigned(((x - 9) + .5) / 711.0 * 139);
           const unsigned value = x < 9 ? 0 : (sx + 3 * y) % 256;
           assert(row[x] == value * 0x010101u);
@@ -233,17 +187,26 @@ int main() {
     }
     assert(restored); checkClean();
   }
-  // A flip delayed by one field must not create a persistent field-order error.
+  // Also handle a field counter whose IRQ/events occur only once per frame.
+  for (unsigned ticks : {2u, 4u}) {
+    reset(ticks); counter_stride = ticks;
+    {
+      TestDisplay display(9, 0, 0); display.InitRenderer(720, 480);
+      for (int i = 0; i < 5; ++i) display.renderFrame(Pattern());
+      for (size_t i = 1; i < flips.size(); ++i)
+        assert(kms::distance(flips[i], flips[i - 1]) == int(ticks));
+    }
+    assert(restored); checkClean();
+  }
+  // A delayed flip landing on the opposite field must not continue playback.
   for (unsigned ticks : {2u, 4u}) {
     reset(ticks); counter_stride = ticks / 2;
     {
       TestDisplay display(9, 0, 0); display.InitRenderer(720, 480);
       delayed_flip = counter_stride;
-      display.renderFrame(Pattern());
-      display.renderFrame(Pattern(525, 17));
-      assert(kms::distance(flips[1], flips[0]) == int(2 * counter_stride));
-      for (size_t i = 1; i < flips.size(); ++i)
-        checkCapturedField(i, (i - 1) % 2, ((i - 1) / 2) * 17);
+      bool failed = false;
+      try { display.renderFrame(Pattern()); } catch (const std::runtime_error &) { failed = true; }
+      assert(failed);
     }
     assert(restored); checkClean();
   }
@@ -287,8 +250,8 @@ int main() {
   catch (const std::runtime_error &) { rejected = true; }
   assert(rejected); // Four events/image is not the doubled software counter case.
   rejected = false;
-  try { kms::completedIntervals({10, 1000000}, {12, 1100000}, 2, 33366.67); }
+  try { kms::completedFrames({10, 1000000}, {12, 1100000}, 2, 33366.67); }
   catch (const std::runtime_error &) { rejected = true; }
   assert(rejected);
-  std::puts("PASS: identical field order for both startup parities, DRM cadence, wraparound, late fields, raster, cleanup and cancellation");
+  std::puts("PASS: DRM cadence, wraparound, late frames, phase loss, raster, cleanup and cancellation");
 }

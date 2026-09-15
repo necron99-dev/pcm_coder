@@ -39,8 +39,8 @@ struct KMSDisplayConsumer::Scanout {
   bool changed = false, pending = false, have_pcm = false;
   bool field_events = false;
   kms::Stamp event{}, last_flip{};
-  unsigned ticks = 0, presentation_ticks = 0;
-  double frame_us = 0, presentation_us = 0;
+  unsigned ticks = 0;
+  double frame_us = 0;
   std::function<bool()> stopping;
   uint64_t stats_start = 0;
   unsigned intervals = 0, repeats = 0;
@@ -189,39 +189,32 @@ struct KMSDisplayConsumer::Scanout {
     // Some drivers count fields but deliver events only once per full frame.
     // Waiting for an intermediate field on those drivers would halve playback.
     field_events = kms::hasFieldEvents(ticks, smallest_step);
-    presentation_ticks = field_events ? ticks / 2 : ticks;
-    presentation_us = field_events ? frame_us / 2 : frame_us;
-    // Use a completed flip as the timing reference. For field events, both
-    // raster parities will carry the same PCM field, so its identity is moot.
+    // An actual completed flip is the phase anchor, not a wall-clock epoch.
     if (!flip(1)) return;
     last_flip = event;
     std::fprintf(stderr,
         "\nKMS sync: %ux%u interlaced, %.3f ms/image, %u counter ticks/image; "
-        "events=%s (step=%u); presentation=%s; flip anchor=%u.\n",
+        "events=%s (step=%u); flip anchor=%u. Physical odd/even field is not reported by DRM.\n",
         mode.hdisplay, mode.vdisplay, frame_us / 1000, ticks,
-        field_events ? "field" : "frame", smallest_step,
-        field_events ? "one PCM field in both raster parities" : "complete PCM images",
-        last_flip.sequence);
+        field_events ? "field" : "frame", smallest_step, last_flip.sequence);
   }
 
-  void report(kms::Stamp previous, unsigned steps, bool enabled) {
-    if (steps > 1)
-      std::fprintf(stderr, "\nKMS underrun: repeated the previous %s for %u extra interval(s).\n",
-          field_events ? "field" : "image", steps - 1);
+  void report(kms::Stamp previous, unsigned frames, bool enabled) {
+    if (frames > 1)
+      std::fprintf(stderr, "\nKMS underrun: repeated the previous image for %u extra frame(s).\n", frames - 1);
     if (!enabled) return;
     if (!stats_start) stats_start = previous.us;
     const double gap = (event.us - previous.us) / 1000.0;
     min_ms = std::min(min_ms, gap);
     max_ms = std::max(max_ms, gap);
     ++intervals;
-    repeats += steps - 1;
+    repeats += frames - 1;
     const double elapsed = (event.us - stats_start) / 1000000.0;
     if (elapsed >= 5) {
       std::fprintf(stderr,
-          "\nKMS timing: %.3f completed %s flips/s; gap min=%.3f max=%.3f ms; "
-          "repeated-%s=%u; sequence=%u timestamp=%llu us\n",
-          intervals / elapsed, field_events ? "field" : "frame", min_ms, max_ms,
-          field_events ? "fields" : "frames", repeats, event.sequence,
+          "\nKMS timing: %.3f completed flips/s; gap min=%.3f max=%.3f ms; "
+          "repeated=%u; sequence=%u timestamp=%llu us\n",
+          intervals / elapsed, min_ms, max_ms, repeats, event.sequence,
           static_cast<unsigned long long>(event.us));
       stats_start = event.us;
       intervals = repeats = 0;
@@ -233,10 +226,10 @@ struct KMSDisplayConsumer::Scanout {
     if (fd < 0) return;
     try {
       if (pending) wait(false);
-      // Let the last presented field/image finish before restoring the console.
+      // Let the last PCM image finish scanning before restoring the console.
       if (have_pcm && ticks && !(stopping && stopping()) &&
-          kms::distance(currentTick(), last_flip.sequence + presentation_ticks) < 0)
-        waitTick(last_flip.sequence + presentation_ticks, false);
+          kms::distance(currentTick(), last_flip.sequence + ticks) < 0)
+        waitTick(last_flip.sequence + ticks, false);
     } catch (const std::exception &error) {
       std::fprintf(stderr, "\nDRM cleanup: %s\n", error.what());
     }
@@ -298,45 +291,34 @@ void KMSDisplayConsumer::renderFrame(const IFrame &frame) {
   if (frame.width() <= 0 || frame.heigth() <= 0 || dest_height <= 0 || dest_height > INT32_MAX)
     throw std::runtime_error("Height modifier must leave a valid positive frame height.");
   const int dest_width = width - left_offset - right_offset;
-  // Apply the same horizontal and vertical mapping as before. In field mode,
-  // extract one destination-raster parity at a time, then duplicate its rows.
-  // Either physical scanout parity consequently reads the intended PCM field.
+  const int next = 1 - out.front;
+  auto &buffer = out.buffers[next];
+  std::memset(buffer.map, 0, buffer.size);
+  // Nearest-neighbour pixel-centre sampling matches the former SDL texture.
+  // No vertical rescaling unless explicitly requested with --heigth_mod.
   std::array<int, 720> source_x{};
   for (int x = 0; x < dest_width; ++x)
     source_x[x] = (int64_t(2 * x + 1) * frame.width()) / (2 * dest_width);
+  for (int y = 0; y < std::min<int64_t>(heigth, dest_height); ++y) {
+    const int sy = (int64_t(2 * y + 1) * frame.heigth()) / (2 * dest_height);
+    auto *row = reinterpret_cast<uint32_t *>(static_cast<uint8_t *>(buffer.map) + y * buffer.pitch);
+    for (int x = 0; x < dest_width; ++x) {
+      const uint32_t value = pixels.pixels[size_t(sy) * frame.width() + source_x[x]];
+      row[left_offset + x] = value * 0x010101u;
+    }
+  }
   if (display_stats && !out.have_pcm)
     std::fprintf(stderr, "\nKMS geometry: source=%dx%d, draw=%dx%lld+%d+0, screen=%dx%d\n",
         frame.width(), frame.heigth(), dest_width, static_cast<long long>(dest_height),
         left_offset, width, heigth);
 
-  const int fields = out.field_events ? 2 : 1;
-  for (int field = 0; field < fields; ++field) {
-    if (stopping && stopping()) return;
-    const int next = 1 - out.front;
-    auto &buffer = out.buffers[next];
-    std::memset(buffer.map, 0, buffer.size);
-    for (int y = 0; y < heigth; y += fields) {
-      const int raster_y = y + field;
-      if (raster_y >= dest_height) continue;
-      const int sy = (int64_t(2 * raster_y + 1) * frame.heigth()) / (2 * dest_height);
-      auto *row = reinterpret_cast<uint32_t *>(
-          static_cast<uint8_t *>(buffer.map) + y * buffer.pitch);
-      for (int x = 0; x < dest_width; ++x) {
-        const uint32_t value = pixels.pixels[size_t(sy) * frame.width() + source_x[x]];
-        row[left_offset + x] = value * 0x010101u;
-      }
-      if (out.field_events && y + 1 < heigth)
-        std::memcpy(static_cast<uint8_t *>(buffer.map) + (y + 1) * buffer.pitch,
-                    row, buffer.pitch);
-    }
-
-    // Queue each chronological PCM field for the next field event. No odd/even
-    // phase guess and no intervening-field wait: the payload is parity-neutral.
-    if (!out.flip(next)) return;
-    const unsigned steps = kms::completedIntervals(out.last_flip, out.event,
-        out.presentation_ticks, out.presentation_us);
-    if (out.have_pcm) out.report(out.last_flip, steps, display_stats);
-    out.last_flip = out.event;
-    out.have_pcm = true;
-  }
+  const uint32_t now = out.currentTick();
+  const uint32_t submit = out.field_events
+      ? kms::submissionTick(out.last_flip.sequence, now, out.ticks) : now;
+  if (kms::distance(submit, now) > 0 && !out.waitTick(submit)) return;
+  if (!out.flip(next)) return;
+  const unsigned frames = kms::completedFrames(out.last_flip, out.event, out.ticks, out.frame_us);
+  if (out.have_pcm) out.report(out.last_flip, frames, display_stats);
+  out.last_flip = out.event;
+  out.have_pcm = true;
 }

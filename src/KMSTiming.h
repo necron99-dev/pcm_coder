@@ -37,22 +37,37 @@ inline unsigned ticksPerFrame(std::vector<double> tick_us, double frame_us) {
   throw std::runtime_error(message.str());
 }
 
+// Submit during the intervening field so the flip
+// lands on the same relative phase as the previous completed flip.
+// When late, keep this phase rather than submitting a burst to catch up.
+inline uint32_t submissionTick(uint32_t previous, uint32_t current,
+                               unsigned ticks) {
+  if (ticks != 2 && ticks != 4)
+    throw std::runtime_error("Field submission requires two or four counter ticks/image.");
+  const int32_t elapsed = distance(current, previous);
+  if (elapsed < 0)
+    throw std::runtime_error("DRM vblank counter moved backwards.");
+  const unsigned phase = static_cast<unsigned>(elapsed) % ticks;
+  const unsigned halfway = ticks / 2;
+  return current + (phase < halfway ? halfway - phase : 0);
+}
+
 inline bool hasFieldEvents(unsigned ticks, unsigned smallest_step) {
   if (smallest_step == ticks) return false;
   if ((ticks == 2 || ticks == 4) && smallest_step == ticks / 2) return true;
   throw std::runtime_error("DRM event counter step does not represent a field or full frame.");
 }
 
-inline unsigned completedIntervals(Stamp previous, Stamp current,
-                                 unsigned ticks, double period_us) {
+inline unsigned completedFrames(Stamp previous, Stamp current,
+                                 unsigned ticks, double frame_us) {
   const int32_t elapsed = distance(current.sequence, previous.sequence);
   if (!ticks || elapsed <= 0 || elapsed % ticks != 0 || current.us <= previous.us ||
-      current.us - previous.us < period_us * .75)
+      current.us - previous.us < frame_us * .75)
     throw std::runtime_error(
-        "DRM page flip counter or interval is invalid; stopping playback.");
-  const double expected = (elapsed / ticks) * period_us;
-  if (std::abs(double(current.us - previous.us) - expected) > period_us * .25)
-    throw std::runtime_error("DRM flip timestamps disagree with the presentation counter.");
+        "DRM page flip lost frame phase; stopping to avoid mixing PCM fields.");
+  const double expected = (elapsed / ticks) * frame_us;
+  if (std::abs(double(current.us - previous.us) - expected) > frame_us * .25)
+    throw std::runtime_error("DRM flip timestamps disagree with the frame counter.");
   return static_cast<unsigned>(elapsed) / ticks;
 }
 } // namespace kms

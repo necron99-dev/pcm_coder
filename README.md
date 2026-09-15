@@ -10,12 +10,10 @@ boot configuration, playback, and troubleshooting.
 
 **KMS composite playback has been reported working on a Pi 3B+ with an NTSC
 Sony PCM-501ES**, using default 14-bit encoding and `--left_offset 9`.
-The earlier DRM path played consistently in 14-bit mode, but 16-bit playback
-alternated between clean and noisy across starts. The current implementation
-presents individual PCM fields to remove the startup phase dependency; this
-change still needs a Pi/Sony hardware retest. Builds and file checks run in a
-Debian Trixie container; passing file tests does not establish hardware decoding
-quality.
+The DRM event-driven path has also been reported to play consistently in
+14-bit mode. On the same setup, 16-bit playback produces music with substantial
+noise and remains unresolved. Builds and file checks run in a Debian Trixie
+container; passing file tests does not establish hardware decoding quality.
 
 ## Features
 
@@ -140,9 +138,8 @@ it to 711 pixels. The KMS backend preserves vertical scan lines when cropping
 and clips at the display edges. See the setup guide for test limitations,
 diagnostics, and console/SSH display access. Presentation waits for DRM
 page-flip completion and follows measured vblank events instead of a software
-timer. On drivers with field-rate events, each PCM field is copied into both
-raster parities and presented at the next field event. That preserves temporal
-field order regardless of which physical field starts playback.
+timer. Each completed flip is checked against the established relative frame
+phase; DRM does not identify physical odd/even fields.
 
 ### Preview on a desktop
 
@@ -163,7 +160,7 @@ console.
 | `--pal` / `--ntsc` | Select the video standard for encoding or desktop preview. |
 | `--14` / `--16` | Select the PCM audio bit width. |
 | `--swap-fields` | Exchange the PCM image fields before cropping, for field-order diagnostics. |
-| `--display-stats` | Report geometry, DRM flip timestamps, and repeated fields/frames in KMS Pi mode. |
+| `--display-stats` | Report geometry, DRM flip timestamps, and repeated frames in KMS Pi mode. |
 | `--no-dither` | Disable dithering when converting to 14-bit audio. |
 | `--no-parity` | Disable parity generation. |
 | `--no-q` | Disable Q generation in 14-bit mode. |
@@ -192,9 +189,8 @@ sh tests/kms_scanout.sh
 ```
 
 The DRM test compiles a simulated device around the actual display consumer.
-It checks identical chronological output for both initial scanout parities,
-PAL/NTSC cadence, field/frame event rates, sequence wraparound, late fields,
-raster geometry, cancellation, and resource cleanup.
+It checks PAL/NTSC cadence, field/frame event rates, sequence wraparound, late
+frames, phase-loss rejection, raster geometry, cancellation, and resource cleanup.
 It requires the SDL2 and libdrm development packages.
 
 These checks run without display hardware and do not verify composite output
