@@ -10,10 +10,10 @@ boot configuration, playback, and troubleshooting.
 
 **KMS composite playback has been reported working on a Pi 3B+ with an NTSC
 Sony PCM-501ES**, using default 14-bit encoding and `--left_offset 9`.
-That listening result used the earlier SDL presentation path. The current
-DRM event-driven presentation path preserves those geometry settings but still
-needs a Pi/Sony hardware retest. Builds and file checks run in a Debian Trixie
-container.
+The DRM event-driven path has also been reported to play consistently in
+14-bit mode. On the same setup, 16-bit playback produces music with substantial
+noise and remains unresolved. Builds and file checks run in a Debian Trixie
+container; passing file tests does not establish hardware decoding quality.
 
 ## Features
 

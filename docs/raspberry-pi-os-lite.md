@@ -10,9 +10,13 @@ dependency on `/opt/vc`, `bcm_host`, and DispmanX.
 **Audio playback has been reported working on a Pi 3B+ with an NTSC Sony
 PCM-501ES**, using default 14-bit encoding, `--crop-top 0`, and
 `--left_offset 9`. Zero horizontal offsets previously produced noise.
-That listening result predates the new DRM event-driven presentation path,
-which still needs hardware retesting with the same settings. Waveform accuracy,
-bit-error rate, 16-bit playback, and other decoder/TV-standard combinations
+The DRM event-driven path at commit `a7ada62` has now also been reported to
+play consistently in 14-bit mode. The provided log shows 29.971 completed
+flips/s, roughly 33.367 ms between flips, and no repeated frames over about
+30 seconds. The driver reports two counter increments per field, four per
+image. On the same setup, 16-bit mode produces music with substantial noise.
+Its cause remains unresolved; the reported timing log was from 14-bit playback.
+Waveform accuracy, bit-error rate, and other decoder/TV-standard combinations
 remain unverified.
 
 ## Build
