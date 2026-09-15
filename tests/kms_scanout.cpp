@@ -158,8 +158,9 @@ int drmHandleEvent(int fd, drmEventContextPtr context) {
 }
 
 int main() {
-  for (bool pal : {false, true}) for (unsigned ticks : {1u, 2u}) {
+  for (bool pal : {false, true}) for (unsigned ticks : {1u, 2u, 4u}) {
     reset(ticks, pal);
+    if (ticks == 4) counter_stride = 2; // Two counts for each physical field.
     {
       TestDisplay display(9, 0, 0);
       display.InitRenderer(720, mode.vdisplay);
@@ -187,24 +188,28 @@ int main() {
     assert(restored); checkClean();
   }
   // Also handle a field counter whose IRQ/events occur only once per frame.
-  reset(2); counter_stride = 2;
-  {
-    TestDisplay display(9, 0, 0); display.InitRenderer(720, 480);
-    for (int i = 0; i < 5; ++i) display.renderFrame(Pattern());
-    for (size_t i = 1; i < flips.size(); ++i)
-      assert(kms::distance(flips[i], flips[i - 1]) == 2);
+  for (unsigned ticks : {2u, 4u}) {
+    reset(ticks); counter_stride = ticks;
+    {
+      TestDisplay display(9, 0, 0); display.InitRenderer(720, 480);
+      for (int i = 0; i < 5; ++i) display.renderFrame(Pattern());
+      for (size_t i = 1; i < flips.size(); ++i)
+        assert(kms::distance(flips[i], flips[i - 1]) == int(ticks));
+    }
+    assert(restored); checkClean();
   }
-  assert(restored); checkClean();
   // A delayed flip landing on the opposite field must not continue playback.
-  reset(2);
-  {
-    TestDisplay display(9, 0, 0); display.InitRenderer(720, 480);
-    delayed_flip = 1;
-    bool failed = false;
-    try { display.renderFrame(Pattern()); } catch (const std::runtime_error &) { failed = true; }
-    assert(failed);
+  for (unsigned ticks : {2u, 4u}) {
+    reset(ticks); counter_stride = ticks / 2;
+    {
+      TestDisplay display(9, 0, 0); display.InitRenderer(720, 480);
+      delayed_flip = counter_stride;
+      bool failed = false;
+      try { display.renderFrame(Pattern()); } catch (const std::runtime_error &) { failed = true; }
+      assert(failed);
+    }
+    assert(restored); checkClean();
   }
-  assert(restored); checkClean();
   // Partial allocation failure releases the first buffer without a modeset.
   reset(2); create_failure = 2;
   {
@@ -233,8 +238,17 @@ int main() {
   assert(!restored); checkClean();
   bool rejected = false;
   try { kms::ticksPerFrame({1000, 1000, 1000, 1000}, 33366.67); }
-  catch (const std::runtime_error &) { rejected = true; }
+  catch (const std::runtime_error &error) {
+    const std::string message = error.what();
+    assert(message.find("1000 us/counter tick") != std::string::npos);
+    assert(message.find("mode=33366.7") != std::string::npos);
+    rejected = true;
+  }
   assert(rejected);
+  rejected = false;
+  try { kms::hasFieldEvents(4, 1); }
+  catch (const std::runtime_error &) { rejected = true; }
+  assert(rejected); // Four events/image is not the doubled software counter case.
   rejected = false;
   try { kms::completedFrames({10, 1000000}, {12, 1100000}, 2, 33366.67); }
   catch (const std::runtime_error &) { rejected = true; }

@@ -167,11 +167,18 @@ struct KMSDisplayConsumer::Scanout {
     // 60 Hz mode can expose field or frame events; do not guess from its name.
     std::vector<double> samples;
     unsigned smallest_step = UINT_MAX;
+    std::fprintf(stderr, "\nKMS calibration: mode=%.3f us/image, CRTC=%u (index=%u)\n",
+        frame_us, saved->crtc_id, pipe);
     if (!waitTick(currentTick() + 1)) return;
     auto previous = event;
     for (unsigned i = 0; i < 8; ++i) {
       if (!waitTick(currentTick() + 1)) return;
       const int32_t delta = kms::distance(event.sequence, previous.sequence);
+      std::fprintf(stderr,
+          "KMS vblank sample %u: sequence=%u -> %u, timestamp=%llu -> %llu us\n",
+          i + 1, previous.sequence, event.sequence,
+          static_cast<unsigned long long>(previous.us),
+          static_cast<unsigned long long>(event.us));
       if (delta <= 0 || event.us <= previous.us)
         throw std::runtime_error("Invalid DRM vblank calibration timestamps.");
       samples.push_back(double(event.us - previous.us) / delta);
@@ -181,17 +188,15 @@ struct KMSDisplayConsumer::Scanout {
     ticks = kms::ticksPerFrame(samples, frame_us);
     // Some drivers count fields but deliver events only once per full frame.
     // Waiting for an intermediate field on those drivers would halve playback.
-    if (smallest_step > ticks)
-      throw std::runtime_error("DRM calibration could not observe a complete frame interval.");
-    field_events = ticks == 2 && smallest_step == 1;
+    field_events = kms::hasFieldEvents(ticks, smallest_step);
     // An actual completed flip is the phase anchor, not a wall-clock epoch.
     if (!flip(1)) return;
     last_flip = event;
     std::fprintf(stderr,
-        "\nKMS sync: %ux%u interlaced, %.3f ms/image, %u vblank ticks/image; "
-        "events=%s; flip anchor=%u. Physical odd/even field is not reported by DRM.\n",
+        "\nKMS sync: %ux%u interlaced, %.3f ms/image, %u counter ticks/image; "
+        "events=%s (step=%u); flip anchor=%u. Physical odd/even field is not reported by DRM.\n",
         mode.hdisplay, mode.vdisplay, frame_us / 1000, ticks,
-        field_events ? "field" : "frame", last_flip.sequence);
+        field_events ? "field" : "frame", smallest_step, last_flip.sequence);
   }
 
   void report(kms::Stamp previous, unsigned frames, bool enabled) {

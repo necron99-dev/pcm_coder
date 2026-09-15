@@ -138,14 +138,24 @@ completion event before reusing the previous buffer. There is no sleep-based
 frame clock and no SDL renderer on this path.
 
 When the driver reports one vblank per field, the player submits during the
-intervening field to keep successive flips on the same relative phase, two
-ticks apart. With one vblank per complete frame, it queues the next flip
+intervening field to keep successive flips on the same relative phase, one
+complete image apart. With one vblank per complete frame, it queues the next flip
 directly, including drivers whose counter advances by two at each frame event.
 Late production can repeat a complete image; it does not trigger
 catch-up bursts. Repeats are reported because they can cause audible errors.
 A flip that completes on an unexpected phase stops playback. The legacy flip
 API cannot guarantee a target sequence if scheduling misses the boundary;
 the completion check detects that failure after it happens.
+
+Counter ticks are not necessarily physical fields. Calibration supports one,
+two, or four counts per image and checks the observed event step separately.
+The four-count case accommodates kernels that halve interlaced timing twice:
+two counter increments per physical field, with four increments per image.
+The [upstream 6.18.34 calculation](https://github.com/gregkh/linux/blob/v6.18.34/drivers/gpu/drm/drm_vblank.c)
+halves the adjusted CRTC interval for interlace; the
+[Pi branch calculation](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/drivers/gpu/drm/drm_vblank.c)
+checks whether the vertical timing was already halved. Detection uses measured
+timestamps and counts, not the kernel version string.
 
 DRM event sequence/timestamps do **not** label the physical odd/even field.
 This establishes a repeatable phase relative to the first flip within a run,
@@ -203,7 +213,8 @@ SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
 
 Keep it running for at least 20 seconds and record the `KMS sync`, `KMS geometry`,
 and `KMS timing` lines. Startup reports the measured vblank ticks per image
-and initial flip sequence. Timing reports use completed DRM flip timestamps,
+and initial flip sequence. Raw startup samples show the sequence and timestamp
+pairs, including when calibration fails. Timing reports use completed DRM flip timestamps,
 with minimum/maximum gaps and repeated images over each five-second window.
 NTSC should average about 29.970 flips/s with 33.367 ms gaps; PAL should be
 25 flips/s with 40 ms gaps. These are kernel reports, not analogue measurements.
