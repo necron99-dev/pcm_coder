@@ -14,8 +14,11 @@ The DRM event-driven path at commit `a7ada62` has now also been reported to
 play consistently in 14-bit mode. The provided log shows 29.971 completed
 flips/s, roughly 33.367 ms between flips, and no repeated frames over about
 30 seconds. The driver reports two counter increments per field, four per
-image. On the same setup, 16-bit mode produces music with substantial noise.
-Its cause remains unresolved; the reported timing log was from 14-bit playback.
+image. A subsequent 16-bit run had the same stable cadence and the Sony's
+16-bit indicator lit. Repeating the same 16-bit command produced noisy, clean,
+then noisy playback. This points to startup field phase but does not by itself
+prove the cause. The current field-by-field presentation change has only been
+tested with simulated scanout and still needs hardware verification.
 Waveform accuracy, bit-error rate, and other decoder/TV-standard combinations
 remain unverified.
 
@@ -135,21 +138,27 @@ and `--right_offset` set horizontal margins. Leave `--heigth_mod` at zero
 unless deliberately experimenting with vertical scaling.
 
 The player allocates two DRM scanout buffers and preserves the active interlaced
-composite mode. It first displays black, measures vblank spacing, and anchors
-its relative frame phase to a completed page flip. It prepares the next image
-in the free buffer, queues a synchronized flip, and waits for the kernel's
-completion event before reusing the previous buffer. There is no sleep-based
-frame clock and no SDL renderer on this path.
+composite mode. It first displays black, measures vblank spacing, and waits for
+a completed page flip. Each subsequent flip also waits for kernel completion
+before the previous buffer can be reused. There is no sleep-based frame clock
+and no SDL renderer on this path.
 
-When the driver reports one vblank per field, the player submits during the
-intervening field to keep successive flips on the same relative phase, one
-complete image apart. With one vblank per complete frame, it queues the next flip
-directly, including drivers whose counter advances by two at each frame event.
-Late production can repeat a complete image; it does not trigger
-catch-up bursts. Repeats are reported because they can cause audible errors.
-A flip that completes on an unexpected phase stops playback. The legacy flip
-API cannot guarantee a target sequence if scheduling misses the boundary;
-the completion check detects that failure after it happens.
+On the Pi's field-rate events, the player extracts the first PCM field and
+copies each of its scan lines into both even and odd framebuffer rows. It
+presents that buffer at the next field event, then does the same with the
+second PCM field. Either physical scanout parity therefore reads the intended
+field. Successive PCM images become the sequence A0, B0, A1, B1, and so on,
+independent of which physical parity receives A0. Two field flips still carry
+one PCM image, preserving the audio rate. Horizontal mapping and the number of
+visible lines per field stay the same. Use `--crop-top 0 --left_offset 9` for
+the reported setup and leave `--swap-fields` off.
+
+With a driver that exposes only full-frame events, playback uses complete
+interlaced images and one flip per image. Startup output identifies the path.
+Late production or presentation can repeat a field/image; repeats are reported
+because they can cause audible errors. In the field-rate path, a missed field
+does not permanently reverse the subsequent PCM field sequence. Counter or
+timestamp inconsistencies stop playback.
 
 Counter ticks are not necessarily physical fields. Calibration supports one,
 two, or four counts per image and checks the observed event step separately.
@@ -162,10 +171,11 @@ checks whether the vertical timing was already halved. Detection uses measured
 timestamps and counts, not the kernel version string.
 
 DRM event sequence/timestamps do **not** label the physical odd/even field.
-This establishes a repeatable phase relative to the first flip within a run,
-not a verified analogue field identity across runs. Keep the known working
-field arrangement initially; `--swap-fields` remains a separate raster-order
-diagnostic. Hardware measurement is still required to prove field identity.
+The field-rate path avoids needing that label by placing the same field in
+both row parities. This is not an analogue measurement or proof of error-free
+hardware decoding. `--swap-fields` still exchanges the source fields before
+cropping and changes their playback order; it is a diagnostic, not a startup
+phase selector.
 See the [DRM event interface](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/include/uapi/drm/drm.h)
 and [VC4 flip completion handling](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/drivers/gpu/drm/vc4/vc4_crtc.c).
 
@@ -219,11 +229,13 @@ Keep it running for at least 20 seconds and record the `KMS sync`, `KMS geometry
 and `KMS timing` lines. Startup reports the measured vblank ticks per image
 and initial flip sequence. Raw startup samples show the sequence and timestamp
 pairs, including when calibration fails. Timing reports use completed DRM flip timestamps,
-with minimum/maximum gaps and repeated images over each five-second window.
-NTSC should average about 29.970 flips/s with 33.367 ms gaps; PAL should be
-25 flips/s with 40 ms gaps. These are kernel reports, not analogue measurements.
+with minimum/maximum gaps and repeated fields/frames over each five-second window.
+For field presentation, NTSC should average about 59.94 field flips/s with
+16.683 ms gaps; PAL should be 50 field flips/s with 20 ms gaps. This is still
+29.97 or 25 complete PCM images per second. Full-frame presentation reports
+half those flip rates. These are kernel reports, not analogue measurements.
 
-If startup rejects the cadence or playback reports lost frame phase, preserve
+If startup rejects the cadence or playback reports a counter/timestamp error, preserve
 the error and startup output. Do not try to compensate by changing crop or
 offsets: those settings change image geometry, not event timing. The player
 uses bounded waits and restores the console on exit, including errors and
