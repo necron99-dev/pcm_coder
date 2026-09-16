@@ -20,7 +20,7 @@ std::map<uint32_t, Allocation> allocations;
 uint32_t connector_id = 31, crtc_id = 42, sequence, next_handle, front_fb;
 uint64_t timestamp, next_offset;
 unsigned event_ticks, counter_stride, delayed_flip, create_failure;
-bool pending, page_flip, restored, cancel_playback;
+bool pending, page_flip, restored, cancel_playback, full_frame, reject_modeset;
 void *event_data;
 FILE *backing;
 std::vector<uint32_t> flips;
@@ -32,6 +32,7 @@ void reset(unsigned ticks, bool pal = false) {
   next_handle = 1; next_offset = 0; front_fb = 99;
   event_ticks = ticks; counter_stride = 1; delayed_flip = create_failure = 0;
   pending = restored = cancel_playback = false;
+  full_frame = reject_modeset = false;
   backing = tmpfile(); assert(backing);
   mode = {};
   mode.hdisplay = 720; mode.vdisplay = pal ? 576 : 480;
@@ -125,7 +126,24 @@ int drmModeAddFB2(int, uint32_t, uint32_t, uint32_t format,
 int drmModeRmFB(int, uint32_t) { return 0; }
 int drmModeSetCrtc(int, uint32_t crtc, uint32_t fb, uint32_t, uint32_t,
                    uint32_t *, int, drmModeModeInfoPtr timing) {
-  assert(crtc == crtc_id); assert(std::memcmp(timing, &mode, sizeof(mode)) == 0);
+  assert(crtc == crtc_id);
+  if (full_frame && fb != 99) {
+    assert(timing->hdisplay == 720 && timing->vdisplay == 492);
+    assert(timing->clock == mode.clock && timing->htotal == mode.htotal);
+    assert(timing->hsync_start == mode.hsync_start && timing->hsync_end == mode.hsync_end);
+    assert(timing->vtotal == mode.vtotal && timing->flags == mode.flags);
+    // Independently check the VC4 adjusted per-field limits and total.
+    const unsigned active = timing->vdisplay / 2;
+    const unsigned front = timing->vsync_start / 2 - active;
+    const unsigned sync = timing->vsync_end / 2 - timing->vsync_start / 2;
+    const unsigned back = timing->vtotal / 2 - timing->vsync_end / 2;
+    assert(active == 246 && front > 0 && sync == 3 && back >= 4);
+    assert(active + front + sync + back == 262);
+    assert(allocations.at(fb).size >= uint64_t(allocations.at(fb).pitch) * 492);
+  } else {
+    assert(std::memcmp(timing, &mode, sizeof(mode)) == 0);
+  }
+  if (reject_modeset && fb != 99) { errno = EINVAL; return -1; }
   front_fb = fb; if (fb == 99) restored = true;
   return 0;
 }
@@ -198,6 +216,49 @@ int main() {
     }
     assert(restored); checkClean();
   }
+  // Every PCM row survives the experimental raster, including both fields'
+  // last rows. Cadence stays unchanged and teardown restores the original mode.
+  for (unsigned ticks : {1u, 2u, 4u}) {
+    reset(ticks); full_frame = true;
+    if (ticks == 4) counter_stride = 2;
+    {
+      TestDisplay display(9, 0, 0, true, {}, true);
+      display.InitRenderer(720, 480);
+      for (int i = 0; i < 5; ++i) display.renderFrame(Pattern(492));
+      for (size_t i = 1; i < flips.size(); ++i)
+        assert(kms::distance(flips[i], flips[i - 1]) == int(ticks));
+      const auto &a = allocations.at(front_fb);
+      std::vector<uint32_t> row(a.pitch / 4);
+      for (int y = 0; y < 492; ++y) {
+        assert(pread(fileno(backing), row.data(), a.pitch, a.offset + y * a.pitch) == a.pitch);
+        for (int x = 0; x < 720; ++x) {
+          const unsigned sx = x < 9 ? 0 : unsigned(((x - 9) + .5) / 711.0 * 139);
+          const unsigned value = x < 9 ? 0 : (sx + 3 * y) % 256;
+          assert(row[x] == value * 0x010101u);
+        }
+      }
+      bool failed = false;
+      try { display.renderFrame(Pattern()); } catch (const std::runtime_error &) { failed = true; }
+      assert(failed); // Never silently accept padded/clipped input on this path.
+    }
+    assert(restored); checkClean();
+  }
+  reset(2); full_frame = reject_modeset = true;
+  {
+    TestDisplay display(9, 0, 0, false, {}, true);
+    bool failed = false;
+    try { display.InitRenderer(720, 480); } catch (const std::runtime_error &) { failed = true; }
+    assert(failed);
+  }
+  assert(!restored && front_fb == 99); checkClean();
+  reset(2, true);
+  {
+    TestDisplay display(9, 0, 0, false, {}, true);
+    bool failed = false;
+    try { display.InitRenderer(720, 576); } catch (const std::runtime_error &) { failed = true; }
+    assert(failed);
+  }
+  assert(!restored); checkClean();
   // A delayed flip landing on the opposite field must not continue playback.
   for (unsigned ticks : {2u, 4u}) {
     reset(ticks); counter_stride = ticks / 2;

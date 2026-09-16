@@ -117,6 +117,14 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
       ->needs(rpi_mode);
   newOption(app, "--heigth_mod", options.Rpi_heigth_mod, "RPI heigth modifier.")
       ->needs(rpi_mode);
+#ifndef RPI_LEGACY
+  newFlag(app, "--kms-full-frame", options.Rpi_full_frame,
+          "Experimental NTSC 720x492i scanout: transmit all PCM rows without padding.")
+      ->needs(rpi_mode)
+      ->excludes("--crop-top")
+      ->excludes("--crop-bot")
+      ->excludes("--heigth_mod");
+#endif
 #endif
 }
 

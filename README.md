@@ -10,9 +10,14 @@ boot configuration, playback, and troubleshooting.
 
 **KMS composite playback has been reported working on a Pi 3B+ with an NTSC
 Sony PCM-501ES**, using default 14-bit encoding and `--left_offset 9`.
-The DRM event-driven path has also been reported to play consistently in
-14-bit mode. On the same setup, 16-bit playback produces music with substantial
-noise and remains unresolved. Builds and file checks run in a Debian Trixie
+Direct 14-bit monitoring has been reported clean after console/CPU isolation
+changes, but recordings through a Sony SLV-R1000 still drop out; direct Pi-to-VCR
+recordings fail to lock reliably, including with monochrome output. Native
+PCM-501ES recordings play cleanly on that deck. On the same setup, 16-bit playback
+produces music with substantial noise and remains unresolved.
+An opt-in [full-frame scanout experiment](docs/raspberry-pi-os-lite.md#experimental-full-frame-ntsc-scanout)
+removes the known PCM row clipping; hardware validation is pending.
+Builds and file checks run in a Debian Trixie
 container; passing file tests does not establish hardware decoding quality.
 
 ## Features
@@ -161,6 +166,7 @@ console.
 | `--14` / `--16` | Select the PCM audio bit width. |
 | `--swap-fields` | Exchange the PCM image fields before cropping, for field-order diagnostics. |
 | `--display-stats` | Report geometry, DRM flip timestamps, and repeated frames in KMS Pi mode. |
+| `--kms-full-frame` | Experimental NTSC 720×492i scanout with all PCM rows; requires `-R`, excludes cropping and height scaling. |
 | `--no-dither` | Disable dithering when converting to 14-bit audio. |
 | `--no-parity` | Disable parity generation. |
 | `--no-q` | Disable Q generation in 14-bit mode. |

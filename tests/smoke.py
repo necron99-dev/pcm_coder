@@ -59,3 +59,15 @@ with tempfile.TemporaryDirectory(prefix="pcm-smoke-") as directory:
         assert unavailable.returncode == 1, unavailable
         assert "SDL video initialization failed" in unavailable.stderr, unavailable.stderr
         print("PASS: SDL initialization failure reported cleanly")
+    if "--kms-full-frame" in help_text:
+        for args in (["--kms-full-frame"],
+                     ["-R", "--kms-full-frame", "--crop-top", "0"],
+                     ["-R", "--kms-full-frame", "--crop-bot", "1"],
+                     ["-R", "--kms-full-frame", "--heigth_mod", "-12"]):
+            conflict = subprocess.run([binary, *args, str(source)],
+                env={**os.environ, "SDL_VIDEODRIVER": "pcm-test-unavailable"},
+                capture_output=True, text=True)
+            assert conflict.returncode != 0, conflict
+            assert "--kms-full-frame" in conflict.stderr, conflict.stderr
+            assert "SDL video initialization failed" not in conflict.stderr, conflict.stderr
+        print("PASS: full-frame mode rejects incompatible CLI options before opening a display")

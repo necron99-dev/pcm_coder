@@ -19,6 +19,14 @@ Its cause remains unresolved; the reported timing log was from 14-bit playback.
 Waveform accuracy, bit-error rate, and other decoder/TV-standard combinations
 remain unverified.
 
+Subsequent tests found tape-recording failures on a Sony SLV-R1000 at SP:
+the Pi through the PCM-501ES COPY OUT produces playback dropouts, while direct
+Pi-to-VCR recording produces severe noise and unreliable lock. EDIT playback
+mode and confirmed Mono composite output did not resolve it. A native
+PCM-501ES recording from a turntable plays cleanly on the same deck.
+Clean live monitoring, including silent PCM, therefore does not establish
+recording compatibility. Silence also cannot reveal repeated identical frames.
+
 ## Build
 
 From the repository directory:
@@ -273,6 +281,54 @@ sudo usermod -aG video,render "$USER"
 An SSH session may lack active-seat/DRM-master access even with these groups;
 try the local console first. SDL requires [DRM master access](https://wiki.libsdl.org/SDL2/SDL_HINT_KMSDRM_REQUIRE_DRM_MASTER)
 to render through KMSDRM. Disabling that requirement does not enable rendering.
+
+## Experimental full-frame NTSC scanout
+
+The default raster has 18 black rows, two PCM control rows, 490 PCM data rows,
+then 15 black rows. Displaying only its first 480 rows loses 30 data rows:
+15 per field. The software erasure test shows recovery for ideal, correctly
+located erasures; it does not show how much additional tape damage a real
+decoder can tolerate. Stable page-flip timing does not detect these lost rows.
+
+`--kms-full-frame` bypasses that padding and temporarily requests a 720x492i
+DRM mode. Each field gets one control row and all 245 data rows. No vertical
+scaling is used. It preserves the original horizontal timing, 13.5 MHz clock,
+858 pixels/line and 525 lines/frame (29.970 images/s). The vertical modeline is
+`492 510 516 525`, giving adjusted active/front/sync/back lengths of
+`246/9/3/4` per field before the driver's half-line handling. This meets the
+[Pi driver's checked limits](https://github.com/raspberrypi/linux/blob/rpi-6.18.y/drivers/gpu/drm/vc4/vc4_vec.c).
+
+**This is a clipping-removal experiment, not verified EIAJ-compliant output.**
+The [PCM standard, section 8.3 and Figure 4a](https://pcm4all.ru/wp-content/uploads/2021/08/IEC-60841-1988.pdf)
+also specifies the physical position of the control/data lines. The experiment
+does not establish those positions or the odd/even field identity on the wire.
+Kernel acceptance and simulated tests cannot establish analogue waveform
+quality or successful tape playback.
+
+After rebuilding the updated checkout on the Pi, use:
+
+```sh
+sudo chrt -f 50 taskset -c 3 \
+  env SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
+  ./build/src/pcm_coder -R --kms-full-frame --left_offset 9 \
+  --display-stats ~/music/Pink_Floyd_DSotM_RMR.wav
+```
+
+Use the same TV mode, tape speed, horizontal offsets and wiring as the previous
+comparison. Do not pass `--crop-top`, `--crop-bot`, or `--heigth_mod`, including
+zero values; this path sends the unpadded PCM frame directly. The expected
+geometry is `source=139x492, draw=711x492+9+0, screen=720x492`. Frame time should
+remain approximately 33.367 ms. The existing flip-phase checks still apply.
+
+Only boot-selected NTSC 720x480i with the timing above is supported. If the
+kernel rejects the mode, playback stops and reports the error instead of
+silently reverting to clipped output. The original display mode is restored
+on normal exit, Ctrl+C and handled playback errors. Omit the flag to use the
+previous path. No boot-file changes or raw register writes are involved.
+
+The simulated scanout test verifies all 492 framebuffer rows, unchanged flip
+cadence, original-mode restoration and cleanup after rejected modesets. It
+does not emulate the analogue encoder or a VCR. A Pi/Sony tape retest is required.
 
 ## Legacy systems
 

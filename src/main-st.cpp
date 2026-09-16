@@ -167,7 +167,8 @@ static int play(Options &options) {
 #else
       display = new KMSDisplayConsumer(options.Rpi_left_offset,
           options.Rpi_right_offset, options.Rpi_heigth_mod,
-          options.Rpi_display_stats, []() { return terminate_flag; });
+          options.Rpi_display_stats, []() { return terminate_flag; },
+          options.Rpi_full_frame);
 #endif
       // Keep ownership if renderer initialization throws.
       std::unique_ptr<SDL2DisplayConsumerBase> initializing_display(display);
@@ -187,10 +188,17 @@ static int play(Options &options) {
                                             options.crop_bot));
     }
     display->onClose([]() { terminate_flag = true; });
-    stage
-        .NextStage(new PixelDuplicatorStage(options.pal, options.crop_top,
-                                            options.crop_bot, 1))
-        .NextConsumer(display);
+#if defined(RPI) && !defined(RPI_LEGACY)
+    if (options.rpiMode && options.Rpi_full_frame) {
+      stage.NextConsumer(display);
+    } else
+#endif
+    {
+      stage
+          .NextStage(new PixelDuplicatorStage(options.pal, options.crop_top,
+                                              options.crop_bot, 1))
+          .NextConsumer(display);
+    }
 #endif
   } else {
     stage

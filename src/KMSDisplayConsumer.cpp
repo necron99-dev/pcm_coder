@@ -33,6 +33,7 @@ struct KMSDisplayConsumer::Scanout {
   };
   int fd = -1; // Borrowed from SDL; never close it here.
   drmModeCrtc *saved = nullptr;
+  drmModeModeInfo mode{};
   uint32_t connector = 0, pipe = 0;
   std::array<Buffer, 2> buffers{};
   int front = 0;
@@ -124,7 +125,7 @@ struct KMSDisplayConsumer::Scanout {
     std::memset(buffer.map, 0, buffer.size);
   }
 
-  void initialize(int width, int height) {
+  void initialize(int width, int height, bool full_frame) {
     std::unique_ptr<drmModeRes, decltype(&drmModeFreeResources)> resources(
         drmModeGetResources(fd), drmModeFreeResources);
     if (!resources) checkDRM(-1, "drmModeGetResources");
@@ -142,7 +143,7 @@ struct KMSDisplayConsumer::Scanout {
     }
     if (!saved || !saved->mode_valid)
       throw std::runtime_error("DRM requires an active Composite connector and CRTC.");
-    const auto &mode = saved->mode;
+    mode = saved->mode;
     if (!(mode.flags & DRM_MODE_FLAG_INTERLACE) || mode.hdisplay != width ||
         mode.vdisplay != height || width != 720 || (height != 480 && height != 576))
       throw std::runtime_error("DRM composite must use the boot-selected 720x480i or 720x576i mode.");
@@ -153,6 +154,25 @@ struct KMSDisplayConsumer::Scanout {
     const double expected = height == 576 ? 40000.0 : 100100.0 / 3.0;
     if (std::abs(frame_us - expected) > expected * .01)
       throw std::runtime_error("Composite refresh does not match PAL/NTSC PCM timing.");
+    if (full_frame) {
+      if (height != 480 || mode.clock != 13500 || mode.htotal != 858 ||
+          mode.vtotal != 525)
+        throw std::runtime_error("--kms-full-frame requires NTSC 720x480i, 13.5 MHz, 858x525 total timing.");
+      // 246 rows/field: one control row and all 245 data rows. Retain
+      // pixel clock, horizontal timing and full-frame total. The adjusted
+      // VC4 timings are active=246, front=9, sync=3, back=4 per field;
+      // four is the driver's minimum back porch for 525-line modes.
+      // This removes clipping but does not prove analogue line/field phase.
+      mode.vdisplay = 492;
+      mode.vsync_start = 510;
+      mode.vsync_end = 516;
+      mode.type = DRM_MODE_TYPE_USERDEF;
+      std::snprintf(mode.name, sizeof(mode.name), "720x492i-PCM");
+      height = mode.vdisplay;
+      std::fprintf(stderr,
+          "\nKMS experimental full frame: 720x492i, vertical timings 492 510 516 525; "
+          "246 rows/field, no PCM padding. Analogue line/field phase is unverified.\n");
+    }
     bool found = false;
     for (int i = 0; i < resources->count_crtcs; ++i) {
       if (resources->crtcs[i] == saved->crtc_id) { pipe = i; found = true; break; }
@@ -160,7 +180,7 @@ struct KMSDisplayConsumer::Scanout {
     if (!found) throw std::runtime_error("Cannot find composite CRTC index.");
     for (auto &buffer : buffers) allocate(buffer, width, height);
     checkDRM(drmModeSetCrtc(fd, saved->crtc_id, buffers[0].fb, 0, 0,
-                          &connector, 1, &saved->mode), "drmModeSetCrtc");
+                          &connector, 1, &mode), "drmModeSetCrtc");
     changed = true;
 
     // Measure actual kernel event spacing while displaying black. A nominal
@@ -251,9 +271,9 @@ struct KMSDisplayConsumer::Scanout {
 
 KMSDisplayConsumer::KMSDisplayConsumer(int left_offset, int right_offset,
                                      int height_mod, bool display_stats,
-                                     std::function<bool()> stopping)
+                                     std::function<bool()> stopping, bool full_frame)
     : left_offset(left_offset), right_offset(right_offset), height_mod(height_mod),
-      display_stats(display_stats), stopping(std::move(stopping)) {}
+      display_stats(display_stats), full_frame(full_frame), stopping(std::move(stopping)) {}
 
 KMSDisplayConsumer::~KMSDisplayConsumer() = default;
 
@@ -263,6 +283,8 @@ void KMSDisplayConsumer::InitRenderer(int width, int height) {
     throw std::runtime_error("Raspberry Pi playback requires SDL_VIDEODRIVER=kmsdrm.");
   this->width = width;
   this->heigth = height;
+  if (full_frame && height_mod != 0)
+    throw std::runtime_error("--kms-full-frame cannot vertically rescale PCM rows.");
   if (left_offset < 0 || right_offset < 0 ||
       static_cast<int64_t>(left_offset) + right_offset >= width)
     throw std::runtime_error("Left and right offsets must leave a positive display width.");
@@ -280,12 +302,15 @@ void KMSDisplayConsumer::InitRenderer(int width, int height) {
   scanout->fd = info.info.kmsdrm.drm_fd;
   scanout->stopping = stopping;
   if (scanout->fd < 0) throw std::runtime_error("SDL did not supply a DRM file descriptor.");
-  scanout->initialize(width, height);
+  scanout->initialize(width, height, full_frame);
+  this->heigth = scanout->mode.vdisplay;
 }
 
 void KMSDisplayConsumer::renderFrame(const IFrame &frame) {
   if (stopping && stopping()) return;
   auto &out = *scanout;
+  if (full_frame && (frame.width() != 139 || frame.heigth() != heigth))
+    throw std::runtime_error("Full-frame scanout requires an unpadded 139x492 PCM frame.");
   auto pixels = frame.render();
   const int64_t dest_height = static_cast<int64_t>(frame.heigth()) + height_mod;
   if (frame.width() <= 0 || frame.heigth() <= 0 || dest_height <= 0 || dest_height > INT32_MAX)
