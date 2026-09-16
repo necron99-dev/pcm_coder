@@ -65,6 +65,29 @@ struct Pattern : IFrame {
     return p;
   }
 };
+
+// A padded PCM raster with known sync, payload, gap and white-reference cells.
+// The render parameters exercise the same level propagation as PCMFrame.
+struct PCMLevelsPattern : IFrame {
+  PCMLevelsPattern() : IFrame(139, 472) {}
+  bool Eof() const override { return false; }
+  static bool dataBit(int bit, int y) {
+    if (y == 10) return false; // All-zero payload.
+    if (y == 11) return true;  // All-one payload.
+    return (bit + y) % 3 == 0;
+  }
+  PixelContainer render(uint8_t high, uint8_t white) const override {
+    PixelContainer p(width(), heigth());
+    for (int y = 10; y < heigth(); ++y) {
+      auto *row = p.pixels.data() + y * 139;
+      row[1] = row[3] = high;
+      for (int bit = 0; bit < 128; ++bit)
+        if (dataBit(bit, y)) row[5 + bit] = high;
+      for (int x = 134; x < 138; ++x) row[x] = white;
+    }
+    return p;
+  }
+};
 }
 
 // Only device-specific SDL calls are replaced; palette/event teardown is real SDL.
@@ -176,6 +199,42 @@ int drmHandleEvent(int fd, drmEventContextPtr context) {
 }
 
 int main() {
+  // Level changes preserve payload bits, sync positions, the one-cell gap,
+  // white reference, black margins and blank rows at the working geometry.
+  for (bool levels : {false, true}) {
+    reset(4); counter_stride = 2;
+    {
+      TestDisplay display(10, 0, 0, true, {}, false, levels);
+      display.InitRenderer(720, 480);
+      for (int i = 0; i < 3; ++i) display.renderFrame(PCMLevelsPattern());
+      for (size_t i = 1; i < flips.size(); ++i)
+        assert(kms::distance(flips[i], flips[i - 1]) == 4);
+      const auto &a = allocations.at(front_fb);
+      std::vector<uint32_t> row(a.pitch / 4);
+      for (int y = 0; y < 480; ++y) {
+        assert(pread(fileno(backing), row.data(), a.pitch, a.offset + y * a.pitch) == a.pitch);
+        for (int x = 0; x < 720; ++x) {
+          unsigned expected = 0;
+          if (x >= 10 && y >= 10 && y < 472) {
+            const int cell = int(((x - 10) + .5) * 139 / 710.0);
+            if (cell >= 134 && cell < 138) expected = 255;
+            else if (cell >= 1 && cell < 134) {
+              const bool high = cell == 1 || cell == 3 ||
+                  (cell >= 5 && cell < 133 && PCMLevelsPattern::dataBit(cell - 5, y));
+              expected = high ? (levels ? 146 : 150) : (levels ? 36 : 0);
+            }
+          }
+          assert(row[x] == expected * 0x010101u);
+        }
+      }
+      if (levels) {
+        bool failed = false;
+        try { display.renderFrame(Pattern()); } catch (const std::runtime_error &) { failed = true; }
+        assert(failed); // Never remap arbitrary image content as PCM data.
+      }
+    }
+    assert(restored); checkClean();
+  }
   for (bool pal : {false, true}) for (unsigned ticks : {1u, 2u, 4u}) {
     reset(ticks, pal);
     if (ticks == 4) counter_stride = 2; // Two counts for each physical field.

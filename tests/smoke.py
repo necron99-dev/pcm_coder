@@ -59,6 +59,18 @@ with tempfile.TemporaryDirectory(prefix="pcm-smoke-") as directory:
         assert unavailable.returncode == 1, unavailable
         assert "SDL video initialization failed" in unavailable.stderr, unavailable.stderr
         print("PASS: SDL initialization failure reported cleanly")
+    if "--kms-pcm-levels" in help_text:
+        missing_rpi = subprocess.run([binary, "--kms-pcm-levels", str(source)],
+            capture_output=True, text=True)
+        assert missing_rpi.returncode != 0, missing_rpi
+        assert "--kms-pcm-levels" in missing_rpi.stderr, missing_rpi.stderr
+        compatible = subprocess.run([binary, "-R", "--kms-pcm-levels",
+            "--left_offset", "10", "--crop-top", "8", "--crop-bot", "45", str(source)],
+            env={**os.environ, "SDL_VIDEODRIVER": "pcm-test-unavailable"},
+            capture_output=True, text=True)
+        assert compatible.returncode == 1, compatible
+        assert "SDL video initialization failed" in compatible.stderr, compatible.stderr
+        print("PASS: PCM levels require -R and accept the working cropped geometry")
     if "--kms-full-frame" in help_text:
         for args in (["--kms-full-frame"],
                      ["-R", "--kms-full-frame", "--crop-top", "0"],

@@ -11,12 +11,22 @@ boot configuration, playback, and troubleshooting.
 **KMS composite playback has been reported working on a Pi 3B+ with an NTSC
 Sony PCM-501ES**, using default 14-bit encoding and `--left_offset 9`.
 Direct 14-bit monitoring has been reported clean after console/CPU isolation
-changes, but recordings through a Sony SLV-R1000 still drop out; direct Pi-to-VCR
-recordings fail to lock reliably, including with monochrome output. Native
+changes. Earlier recordings through a Sony SLV-R1000 dropped out; direct Pi-to-VCR
+recordings initially failed to lock reliably, including with monochrome output. Native
 PCM-501ES recordings play cleanly on that deck. On the same setup, 16-bit playback
 produces music with substantial noise and remains unresolved.
+A later live comparison reported that lock stayed with `--left_offset 10
+--right_offset 0 --crop-top 8 --crop-bot 45` (710-pixel draw width), after a
+703-pixel-wide comparison lost lock when the audio changed. Direct Pi-to-VHS
+recording with this newer geometry was then reported substantially improved
+and close to clean, but still imperfect. The remaining glitches are unresolved.
 An opt-in [full-frame scanout experiment](docs/raspberry-pi-os-lite.md#experimental-full-frame-ntsc-scanout)
-removes the known PCM row clipping; hardware validation is pending.
+removes the known PCM row clipping, but the Pi/PCM-501ES test reported no lock
+and worse results after trying horizontal offsets. Leave `--kms-full-frame`
+disabled on this setup; the recording problem remains unresolved.
+An independent, opt-in [PCM video-level test](docs/raspberry-pi-os-lite.md#experimental-pcm-video-levels)
+raises data-zero above blanking while preserving the selected geometry.
+Its analogue levels and effect on OVC have not yet been verified on the Pi.
 Builds and file checks run in a Debian Trixie
 container; passing file tests does not establish hardware decoding quality.
 
@@ -167,6 +177,7 @@ console.
 | `--swap-fields` | Exchange the PCM image fields before cropping, for field-order diagnostics. |
 | `--display-stats` | Report geometry, DRM flip timestamps, and repeated frames in KMS Pi mode. |
 | `--kms-full-frame` | Experimental NTSC 720×492i scanout with all PCM rows; requires `-R`, excludes cropping and height scaling. |
+| `--kms-pcm-levels` | Experimental PCM data-zero/high RGB codes of 36/146, with blanking 0 and white reference 255; requires `-R`. |
 | `--no-dither` | Disable dithering when converting to 14-bit audio. |
 | `--no-parity` | Disable parity generation. |
 | `--no-q` | Disable Q generation in 14-bit mode. |

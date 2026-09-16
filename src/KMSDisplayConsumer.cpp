@@ -8,6 +8,7 @@
 #include <sys/mman.h>
 #include <poll.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -22,6 +23,38 @@ namespace {
 void checkDRM(int result, const char *operation) {
   if (result < 0)
     throw std::runtime_error(std::string(operation) + ": " + std::strerror(errno));
+}
+
+// IEC 60841 Figure 3: data low/high are 0.1/0.4 V above blanking,
+// while the white reference is 0.7 V above blanking. These RGB values
+// assume a linear full-range DAC transfer; actual Pi voltages are unmeasured.
+constexpr uint8_t pcm_low = 36;   // round(255 * 0.1 / 0.7)
+constexpr uint8_t pcm_high = 146; // round(255 * 0.4 / 0.7)
+constexpr uint8_t pcm_white = 255;
+
+void raisePCMDataZero(IFrame::PixelContainer &pixels) {
+  constexpr int pcm_width = IFrame::WHITE_LINE + IFrame::WHITE_WIDTH + 1;
+  if (pixels.width() != pcm_width)
+    throw std::runtime_error("--kms-pcm-levels requires a 139-cell PCM source.");
+  for (int y = 0; y < pixels.heigth(); ++y) {
+    auto *row = pixels.pixels.data() + size_t(y) * pcm_width;
+    if (std::all_of(row, row + pcm_width, [](uint8_t v) { return v == 0; }))
+      continue; // Preserve vertical blank padding.
+    if (row[0] != 0 || row[pcm_width - 1] != 0 ||
+        row[IFrame::SYNC_LINE_1] != pcm_high ||
+        row[IFrame::SYNC_LINE_2] != pcm_high ||
+        !std::all_of(row + IFrame::WHITE_LINE,
+                     row + IFrame::WHITE_LINE + IFrame::WHITE_WIDTH,
+                     [](uint8_t v) { return v == pcm_white; }))
+      throw std::runtime_error("--kms-pcm-levels requires intact PCM line markers.");
+    // Include the low bits in data sync and the one-cell gap before white.
+    // Keep the outer blank cells and white reference unchanged.
+    for (int x = IFrame::SYNC_LINE_1; x < IFrame::WHITE_LINE; ++x) {
+      if (row[x] == 0) row[x] = pcm_low;
+      else if (row[x] != pcm_high)
+        throw std::runtime_error("Unexpected PCM data level.");
+    }
+  }
 }
 }
 
@@ -271,9 +304,11 @@ struct KMSDisplayConsumer::Scanout {
 
 KMSDisplayConsumer::KMSDisplayConsumer(int left_offset, int right_offset,
                                      int height_mod, bool display_stats,
-                                     std::function<bool()> stopping, bool full_frame)
+                                     std::function<bool()> stopping, bool full_frame,
+                                     bool pcm_levels)
     : left_offset(left_offset), right_offset(right_offset), height_mod(height_mod),
-      display_stats(display_stats), full_frame(full_frame), stopping(std::move(stopping)) {}
+      display_stats(display_stats), full_frame(full_frame), pcm_levels(pcm_levels),
+      stopping(std::move(stopping)) {}
 
 KMSDisplayConsumer::~KMSDisplayConsumer() = default;
 
@@ -311,7 +346,8 @@ void KMSDisplayConsumer::renderFrame(const IFrame &frame) {
   auto &out = *scanout;
   if (full_frame && (frame.width() != 139 || frame.heigth() != heigth))
     throw std::runtime_error("Full-frame scanout requires an unpadded 139x492 PCM frame.");
-  auto pixels = frame.render();
+  auto pixels = pcm_levels ? frame.render(pcm_high, pcm_white) : frame.render();
+  if (pcm_levels) raisePCMDataZero(pixels);
   const int64_t dest_height = static_cast<int64_t>(frame.heigth()) + height_mod;
   if (frame.width() <= 0 || frame.heigth() <= 0 || dest_height <= 0 || dest_height > INT32_MAX)
     throw std::runtime_error("Height modifier must leave a valid positive frame height.");
@@ -332,6 +368,10 @@ void KMSDisplayConsumer::renderFrame(const IFrame &frame) {
       row[left_offset + x] = value * 0x010101u;
     }
   }
+  if (pcm_levels && !out.have_pcm)
+    std::fprintf(stderr,
+        "\nKMS experimental PCM levels: blank=0, data-zero=36, data-one=146, "
+        "white=255 (RGB codes; analogue voltages unverified).\n");
   if (display_stats && !out.have_pcm)
     std::fprintf(stderr, "\nKMS geometry: source=%dx%d, draw=%dx%lld+%d+0, screen=%dx%d\n",
         frame.width(), frame.heigth(), dest_width, static_cast<long long>(dest_height),

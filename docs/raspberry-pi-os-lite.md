@@ -27,6 +27,50 @@ PCM-501ES recording from a turntable plays cleanly on the same deck.
 Clean live monitoring, including silent PCM, therefore does not establish
 recording compatibility. Silence also cannot reveal repeated identical frames.
 
+The latest live comparison used one WAV containing 20 seconds of `holy.wav`,
+20 seconds of `Pink_Floyd_DSotM_RMR.wav`, then the same Holy excerpt again.
+At `--left_offset 13 --right_offset 4 --crop-top 8 --crop-bot 45`, lock was
+lost when Pink Floyd began at 20 seconds. With the same vertical settings and
+`--left_offset 10 --right_offset 0`, the user reported that lock stayed.
+The latter run confirmed `source=139x472, draw=710x472+10+0, screen=720x480`.
+Its supplied timing excerpt showed 29.970 flips/s and gaps of about
+33.356–33.376 ms. A subsequent direct Pi-to-VHS recording with these settings
+was reported substantially improved and close to clean, but still imperfect.
+The user subsequently reported a maximum tracking indication with red OVC
+flashing during recording and more frequent flashing on playback. Adjusting
+OVC did not clear the red indication. Long-duration reliability and the COPY
+OUT route with this geometry remain unverified.
+The known-good tape made with the Sony's native encoder reaches green OVC
+without moving the knob. This provides a working playback reference; it does
+not identify which property of the Pi-generated signal causes the errors.
+
+The working border-matching settings still transmit only 230 of the 245 data
+lines per field: ten black rows, two control rows, 460 data rows, and eight
+black output rows. A comparison changed only `--crop-bot 45` to
+`--crop-bot 0`. This fills those eight bottom rows with PCM data, giving 234
+data lines per field with the same top position, horizontal geometry and
+720x480i mode. It still omits eleven data lines per field. The user reported
+harder initial lock and no improvement in errors, so the working baseline
+remains `--crop-bot 45`. This test did not use the failed full-frame mode.
+
+Current live-test command (keep the existing TV mode and CPU settings):
+
+```sh
+sudo chrt -f 50 taskset -c 3 \
+  env SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
+  ./build/src/pcm_coder -R \
+  --left_offset 10 --right_offset 0 \
+  --crop-top 8 --crop-bot 45 --display-stats \
+  /tmp/pcm-lock-test.wav
+```
+
+This command expects the comparison WAV to have already been created. Keep the
+improved direct recording setup unchanged while checking the remaining glitches.
+Replay the same affected tape passage twice and note whether glitches recur at
+the same positions and whether the PCM-501ES loses lock. Those observations can
+guide the next controlled test without attributing the residual errors to a
+specific part of the signal path prematurely.
+
 ## Build
 
 From the repository directory:
@@ -206,10 +250,14 @@ periods after horizontal sync begins. With 858 pixel periods per line, the
 encoder's 139-cell image should span `139 * 858 / 168 = 709.893` pixels.
 Stretching it to 720 pixels makes it about 1.4% too wide.
 
-The working `--left_offset 9` setting narrows the image to 711 pixels, close
-to that calculated width, and moves it to the right. Use the reported working
-setting for this setup; the nominal timing calculation alone does not capture
-the full analogue signal path or decoder tolerance.
+The earlier working `--left_offset 9` setting narrows the image to 711 pixels,
+close to that calculated width, and moves it to the right. The latest live
+comparison above uses 710 pixels (`--left_offset 10 --right_offset 0`). A
+photo-based 703-pixel setting shortened the nominal bit periods by about 1%
+and showed content-dependent lock loss. Matching TV borders alone is not a
+reliable way to set PCM bit timing. The successful comparison changed both
+horizontal position and width; it does not isolate which change restored lock
+or establish correct analogue timing throughout the signal path.
 
 In the software erasure model, P parity can recover the data lost to this
 default clipping pattern. Clipping alone therefore does not establish the
@@ -282,7 +330,54 @@ An SSH session may lack active-seat/DRM-master access even with these groups;
 try the local console first. SDL requires [DRM master access](https://wiki.libsdl.org/SDL2/SDL_HINT_KMSDRM_REQUIRE_DRM_MASTER)
 to render through KMSDRM. Disabling that requirement does not enable rendering.
 
+## Experimental PCM video levels
+
+The normal renderer uses RGB codes 0/150 for PCM zero/one, with a 255 white
+reference. Zero therefore shares the black padding level. In
+[IEC 60841 Figure 3a/b](https://pcm4all.ru/wp-content/uploads/2021/08/IEC-60841-1988.pdf#page=15),
+data zero is 0.1 V above blanking, data one is 0.4 V above blanking (a 0.3 V
+data swing), and the white reference is 0.7 V above blanking.
+
+`--kms-pcm-levels` tests nominal RGB codes 36/146 for zero/one. This calculation
+assumes a linear mapping from RGB 0–255 to a 0–0.7 V span. The actual DAC
+transfer, TV-mode pedestal and terminated signal levels have not been measured.
+These are software codes, not a verified voltage calibration or a proven fix.
+
+The change applies to the data-sync bits, 128 payload bits and the one-bit gap
+before the white reference. The outer blank cells, vertical padding, margins
+and white reference remain unchanged. Bit values, field arrangement, crops,
+draw width and display mode are unchanged. The option defaults off, affects
+only direct KMS playback, and does not restore the missing PCM lines.
+
+After the updated sources have been built on the Pi, compare this against the
+working command, leaving the OVC knob, TV mode, wiring and WAV unchanged:
+
+```sh
+sudo chrt -f 50 taskset -c 3 \
+  env SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
+  ./build/src/pcm_coder -R --kms-pcm-levels \
+  --left_offset 10 --right_offset 0 \
+  --crop-top 8 --crop-bot 45 --display-stats \
+  /tmp/pcm-lock-test.wav
+```
+
+Expect the same `source=139x472, draw=710x472+10+0, screen=720x480` geometry
+and a new `KMS experimental PCM levels` line reporting the four RGB codes.
+Compare live OVC, lock acquisition and audible errors before making another
+recording. Omit `--kms-pcm-levels` to restore the baseline. Do not add the
+unsuccessful `--kms-full-frame` option to this comparison.
+
+The mocked scanout test checks every output pixel for both level settings,
+including all-zero/all-one payloads, sync, the gap, white reference, margins
+and blank rows. Hardware OVC and VHS results for this option are pending.
+
 ## Experimental full-frame NTSC scanout
+
+**Hardware result: unsuccessful on the reported Pi/PCM-501ES setup.** The user
+reported no lock with `--kms-full-frame` and worse results after testing left
+offsets. Omit this flag to return to the previous output path; no rebuild or
+Git rollback is needed. Keep the other settings unchanged for that comparison.
+The experiment remains available for investigation, but is not a recording fix.
 
 The default raster has 18 black rows, two PCM control rows, 490 PCM data rows,
 then 15 black rows. Displaying only its first 480 rows loses 30 data rows:
@@ -305,7 +400,7 @@ does not establish those positions or the odd/even field identity on the wire.
 Kernel acceptance and simulated tests cannot establish analogue waveform
 quality or successful tape playback.
 
-After rebuilding the updated checkout on the Pi, use:
+For further investigation only, the experimental command is:
 
 ```sh
 sudo chrt -f 50 taskset -c 3 \
@@ -328,7 +423,9 @@ previous path. No boot-file changes or raw register writes are involved.
 
 The simulated scanout test verifies all 492 framebuffer rows, unchanged flip
 cadence, original-mode restoration and cleanup after rejected modesets. It
-does not emulate the analogue encoder or a VCR. A Pi/Sony tape retest is required.
+does not emulate the analogue encoder or a VCR. Those software checks passed,
+but the subsequent hardware test above failed to establish lock. The cause of
+the lock failure and the original tape dropouts remains unresolved.
 
 ## Legacy systems
 

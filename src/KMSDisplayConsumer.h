@@ -9,7 +9,7 @@ struct KMSDisplayConsumer : public SDL2DisplayConsumerBase {
   KMSDisplayConsumer(int left_offset, int right_offset, int height_mod,
                      bool display_stats = false,
                      std::function<bool()> stopping = {},
-                     bool full_frame = false);
+                     bool full_frame = false, bool pcm_levels = false);
   ~KMSDisplayConsumer() override;
   void InitRenderer(int width, int height) override;
 protected:
@@ -20,5 +20,6 @@ private:
   int left_offset, right_offset, height_mod;
   bool display_stats;
   bool full_frame;
+  bool pcm_levels;
   std::function<bool()> stopping;
 };
