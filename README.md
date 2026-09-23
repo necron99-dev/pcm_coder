@@ -179,7 +179,8 @@ console.
 | `--swap-fields` | Exchange the PCM image fields before cropping, for field-order diagnostics. |
 | `--display-stats` | Report geometry, DRM flip timestamps, and repeated frames in KMS Pi mode. |
 | `--kms-full-frame` | Experimental NTSC 720×492i scanout with all PCM rows; requires `-R`, excludes cropping and height scaling. |
-| `--kms-pcm-levels` | Experimental PCM data-zero/high RGB codes of 36/146, with blanking 0 and white reference 255; requires `-R`. |
+| `--kms-pcm-levels` | Experimental PCM data-zero/high RGB codes of 22/146, with blanking 0 and white reference 255; requires `-R`. |
+| `--vec-mono525` | Apply native MONO525 with sync adjustment 7 after KMS setup; requires `-R`, NTSC and `/dev/mem` access. See [VEC profile](docs/raspberry-pi-os-lite.md#native-mono525-vec-profile). |
 | `--no-dither` | Disable dithering when converting to 14-bit audio. |
 | `--no-parity` | Disable parity generation. |
 | `--no-q` | Disable Q generation in 14-bit mode. |

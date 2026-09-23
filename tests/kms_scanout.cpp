@@ -2,6 +2,7 @@
 // No display required. Driver events deliberately include delays and wraparound.
 #include "KMSDisplayConsumer.h"
 #include "KMSTiming.h"
+#include "VecMono525.h"
 #include <SDL2/SDL_syswm.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
@@ -21,6 +22,8 @@ uint32_t connector_id = 31, crtc_id = 42, sequence, next_handle, front_fb;
 uint64_t timestamp, next_offset;
 unsigned event_ticks, counter_stride, delayed_flip, create_failure;
 bool pending, page_flip, restored, cancel_playback, full_frame, reject_modeset;
+unsigned vec_constructed, vec_applied, vec_restored;
+bool vec_failure, expect_vec;
 void *event_data;
 FILE *backing;
 std::vector<uint32_t> flips;
@@ -33,6 +36,8 @@ void reset(unsigned ticks, bool pal = false) {
   event_ticks = ticks; counter_stride = 1; delayed_flip = create_failure = 0;
   pending = restored = cancel_playback = false;
   full_frame = reject_modeset = false;
+  vec_constructed = vec_applied = vec_restored = 0;
+  vec_failure = expect_vec = false;
   backing = tmpfile(); assert(backing);
   mode = {};
   mode.hdisplay = 720; mode.vdisplay = pal ? 576 : 480;
@@ -89,6 +94,24 @@ struct PCMLevelsPattern : IFrame {
   }
 };
 }
+
+// The native MMIO implementation is tested separately by vec_mono525.cpp.
+// Here its stand-in asserts ordering relative to DRM modeset/events/teardown.
+struct VecMono525::Context { bool active = false; };
+VecMono525::VecMono525(const std::string &, const std::string &)
+    : ctx(std::make_unique<Context>()) {
+  assert(front_fb != 99 && !restored && flips.empty()); ++vec_constructed;
+}
+void VecMono525::apply() {
+  assert(front_fb != 99 && !restored && !pending);
+  ctx->active = true; ++vec_applied;
+  if (vec_failure) throw std::runtime_error("simulated VEC failure");
+}
+void VecMono525::restore() noexcept {
+  if (!ctx->active) return;
+  assert(!restored && !pending); ctx->active = false; ++vec_restored;
+}
+VecMono525::~VecMono525() { restore(); }
 
 // Only device-specific SDL calls are replaced; palette/event teardown is real SDL.
 extern "C" {
@@ -167,10 +190,12 @@ int drmModeSetCrtc(int, uint32_t crtc, uint32_t fb, uint32_t, uint32_t,
     assert(std::memcmp(timing, &mode, sizeof(mode)) == 0);
   }
   if (reject_modeset && fb != 99) { errno = EINVAL; return -1; }
+  if (fb == 99 && vec_applied) assert(vec_restored == 1);
   front_fb = fb; if (fb == 99) restored = true;
   return 0;
 }
 int drmWaitVBlank(int, drmVBlankPtr v) {
+  if (expect_vec) assert(vec_applied == 1);
   if (v->request.type & DRM_VBLANK_EVENT) {
     assert(!pending);
     const int32_t delta = kms::distance(v->request.sequence, sequence);
@@ -199,6 +224,31 @@ int drmHandleEvent(int fd, drmEventContextPtr context) {
 }
 
 int main() {
+  // Profile applies once after modeset, before calibration and PCM, and is
+  // restored before the console modeset, including startup failure/cancellation.
+  for (int scenario = 0; scenario < 3; ++scenario) {
+    reset(4); counter_stride = 2; expect_vec = true;
+    vec_failure = scenario == 1; cancel_playback = scenario == 2;
+    bool failed = false;
+    {
+      TestDisplay display(2, 8, 0, false, [] { return cancel_playback; }, false, true, true);
+      try {
+        display.InitRenderer(720, 480);
+        display.renderFrame(PCMLevelsPattern());
+      } catch (const std::runtime_error &) { failed = true; }
+    }
+    assert(failed == vec_failure && restored);
+    assert(vec_constructed == 1 && vec_applied == 1 && vec_restored == 1);
+    checkClean();
+  }
+  reset(2, true);
+  {
+    TestDisplay display(2, 8, 0, false, {}, false, false, true);
+    bool failed = false;
+    try { display.InitRenderer(720, 576); } catch (const std::runtime_error &) { failed = true; }
+    assert(failed && !restored && vec_constructed == 0);
+  }
+  checkClean();
   // Level changes preserve payload bits, sync positions, the one-cell gap,
   // white reference, black margins and blank rows at the working geometry.
   for (bool levels : {false, true}) {
@@ -221,7 +271,7 @@ int main() {
             else if (cell >= 1 && cell < 134) {
               const bool high = cell == 1 || cell == 3 ||
                   (cell >= 5 && cell < 133 && PCMLevelsPattern::dataBit(cell - 5, y));
-              expected = high ? (levels ? 146 : 150) : (levels ? 36 : 0);
+              expected = high ? (levels ? 146 : 150) : (levels ? 22 : 0);
             }
           }
           assert(row[x] == expected * 0x010101u);
@@ -233,7 +283,7 @@ int main() {
         assert(failed); // Never remap arbitrary image content as PCM data.
       }
     }
-    assert(restored); checkClean();
+    assert(restored && vec_constructed == 0); checkClean();
   }
   for (bool pal : {false, true}) for (unsigned ticks : {1u, 2u, 4u}) {
     reset(ticks, pal);

@@ -330,11 +330,44 @@ An SSH session may lack active-seat/DRM-master access even with these groups;
 try the local console first. SDL requires [DRM master access](https://wiki.libsdl.org/SDL2/SDL_HINT_KMSDRM_REQUIRE_DRM_MASTER)
 to render through KMSDRM. Disabling that requirement does not enable rendering.
 
+## Native MONO525 VEC profile
+
+Add `--vec-mono525` to direct KMS playback (`-R`) to apply the equivalent of:
+
+```sh
+sudo python3 ~/tweakvec/tweakvec.py --preset MONO525 --sync-adj 7
+```
+
+The implementation is native C++; Python and a TweakVec checkout are not
+required. It follows the register settings in
+[TweakVec](https://github.com/kFYatek/tweakvec/blob/master/tweakvec.py)
+(public domain / Unlicense), including the preset defaults: NTSC, pedestal on,
+luma and sync on, chroma and burst off, and sync adjustment 7.
+
+The profile is applied **after the KMS modeset and before calibration or PCM
+output**, because the kernel programs the VEC during a modeset. Startup prints
+`VEC MONO525 applied and read back` after checking all written registers.
+Failure to access or configure the VEC stops playback with an error.
+
+This option requires read/write access to `/dev/mem` (normally run with `sudo`),
+a supported Raspberry Pi 0–4 VEC device tree with `vec` and PixelValve symbols,
+and an active 720x480 interlaced NTSC mode (13.5 MHz, 858x525 total timing).
+It rejects PAL and progressive modes. Register addresses come from the running
+device tree. PixelValve timings, PCM levels, crops and offsets are unchanged.
+On normal exit, Ctrl+C or startup failure, the saved VEC settings are restored
+before restoring the previous DRM display. Forced termination cannot perform
+cleanup. Do not run TweakVec concurrently with this option.
+
+The option defaults off. Software tests cover register equivalence, device-tree
+translation, rejected modes, startup ordering and restoration; validation on the
+Pi is still required. This integrates the existing experiment, and does not by
+itself establish error-free VHS recording.
+
 ## Start with PCM silence before playing the file
 
 Add `--wait-for-enter` to KMS playback to send continuous PCM-encoded silence
-before starting the input file. Once the silence prompt appears, apply TweakVec
-from another terminal, allow the decoder to lock, and press Enter in the
+before starting the input file. With `--vec-mono525`, the VEC profile is already
+active when the silence prompt appears. Allow the decoder to lock, and press Enter in the
 `pcm_coder` terminal. Ctrl+C exits while waiting; closing standard input without
 Enter exits with an error rather than starting the file.
 
@@ -343,17 +376,13 @@ For the current level-comparison experiment:
 ```sh
 sudo chrt -f 50 taskset -c 3 \
   env SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
-  ./build/src/pcm_coder -R --kms-pcm-levels --wait-for-enter \
+  ./build/src/pcm_coder -R --vec-mono525 --kms-pcm-levels --wait-for-enter \
   --left_offset 2 --right_offset 8 \
   --crop-top 18 --crop-bot 43 \
   ~/music/holy.wav
 ```
 
-After the silence prompt, in another terminal:
-
-```sh
-sudo python3 ~/tweakvec/tweakvec.py --preset MONO525 --sync-adj 7
-```
+No separate TweakVec command is needed with `--vec-mono525`.
 
 The lead-in uses zero audio samples without dither, with the selected PCM
 format, parity, levels and geometry. Enter starts the file from its beginning
@@ -371,8 +400,10 @@ reference. Zero therefore shares the black padding level. In
 data zero is 0.1 V above blanking, data one is 0.4 V above blanking (a 0.3 V
 data swing), and the white reference is 0.7 V above blanking.
 
-`--kms-pcm-levels` tests nominal RGB codes 36/146 for zero/one. This calculation
-assumes a linear mapping from RGB 0–255 to a 0–0.7 V span. The actual DAC
+`--kms-pcm-levels` currently tests RGB codes **22/146** for zero/one, with
+blanking 0 and white reference 255. The original 36/146 experiment assumed a
+linear mapping from RGB 0–255 to a 0–0.7 V span; the zero code was subsequently
+adjusted to 22 in hardware comparisons. The actual DAC
 transfer, TV-mode pedestal and terminated signal levels have not been measured.
 These are software codes, not a verified voltage calibration or a proven fix.
 

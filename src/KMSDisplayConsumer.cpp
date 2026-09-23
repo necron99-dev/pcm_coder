@@ -1,5 +1,6 @@
 #include "KMSDisplayConsumer.h"
 #include "KMSTiming.h"
+#include "VecMono525.h"
 
 #include <SDL2/SDL_syswm.h>
 #include <xf86drm.h>
@@ -69,6 +70,7 @@ struct KMSDisplayConsumer::Scanout {
   drmModeModeInfo mode{};
   uint32_t connector = 0, pipe = 0;
   std::array<Buffer, 2> buffers{};
+  std::unique_ptr<VecMono525> vec;
   int front = 0;
   bool changed = false, pending = false, have_pcm = false;
   bool field_events = false;
@@ -158,7 +160,7 @@ struct KMSDisplayConsumer::Scanout {
     std::memset(buffer.map, 0, buffer.size);
   }
 
-  void initialize(int width, int height, bool full_frame) {
+  void initialize(int width, int height, bool full_frame, bool vec_mono525) {
     std::unique_ptr<drmModeRes, decltype(&drmModeFreeResources)> resources(
         drmModeGetResources(fd), drmModeFreeResources);
     if (!resources) checkDRM(-1, "drmModeGetResources");
@@ -187,6 +189,9 @@ struct KMSDisplayConsumer::Scanout {
     const double expected = height == 576 ? 40000.0 : 100100.0 / 3.0;
     if (std::abs(frame_us - expected) > expected * .01)
       throw std::runtime_error("Composite refresh does not match PAL/NTSC PCM timing.");
+    if (vec_mono525 && (height != 480 || mode.clock != 13500 ||
+                       mode.htotal != 858 || mode.vtotal != 525))
+      throw std::runtime_error("--vec-mono525 requires NTSC 720x480i, 13.5 MHz, 858x525 timing.");
     if (full_frame) {
       if (height != 480 || mode.clock != 13500 || mode.htotal != 858 ||
           mode.vtotal != 525)
@@ -215,6 +220,16 @@ struct KMSDisplayConsumer::Scanout {
     checkDRM(drmModeSetCrtc(fd, saved->crtc_id, buffers[0].fb, 0, 0,
                           &connector, 1, &mode), "drmModeSetCrtc");
     changed = true;
+
+    // The kernel programs VEC during a modeset. Apply the selected profile
+    // afterwards, before calibration, silent lead-in or the first WAV samples.
+    if (vec_mono525) {
+      vec = std::make_unique<VecMono525>();
+      vec->apply();
+      std::fprintf(stderr,
+          "\nVEC MONO525 applied and read back: NTSC, pedestal on, luma/sync on, "
+          "chroma/burst off, sync_adj=7.\n");
+    }
 
     // Measure actual kernel event spacing while displaying black. A nominal
     // 60 Hz mode can expose field or frame events; do not guess from its name.
@@ -286,6 +301,9 @@ struct KMSDisplayConsumer::Scanout {
     } catch (const std::exception &error) {
       std::fprintf(stderr, "\nDRM cleanup: %s\n", error.what());
     }
+    // Restore while the VEC is still powered for our active CRTC. The kernel
+    // may subsequently reprogram or power it down when restoring the console.
+    vec.reset();
     if (changed && drmModeSetCrtc(fd, saved->crtc_id, saved->buffer_id,
                                  saved->x, saved->y, &connector, 1, &saved->mode) < 0)
       std::fprintf(stderr, "\nCould not restore DRM CRTC: %s\n", std::strerror(errno));
@@ -305,9 +323,10 @@ struct KMSDisplayConsumer::Scanout {
 KMSDisplayConsumer::KMSDisplayConsumer(int left_offset, int right_offset,
                                      int height_mod, bool display_stats,
                                      std::function<bool()> stopping, bool full_frame,
-                                     bool pcm_levels)
+                                     bool pcm_levels, bool vec_mono525)
     : left_offset(left_offset), right_offset(right_offset), height_mod(height_mod),
       display_stats(display_stats), full_frame(full_frame), pcm_levels(pcm_levels),
+      vec_mono525(vec_mono525),
       stopping(std::move(stopping)) {}
 
 KMSDisplayConsumer::~KMSDisplayConsumer() = default;
@@ -337,7 +356,7 @@ void KMSDisplayConsumer::InitRenderer(int width, int height) {
   scanout->fd = info.info.kmsdrm.drm_fd;
   scanout->stopping = stopping;
   if (scanout->fd < 0) throw std::runtime_error("SDL did not supply a DRM file descriptor.");
-  scanout->initialize(width, height, full_frame);
+  scanout->initialize(width, height, full_frame, vec_mono525);
   this->heigth = scanout->mode.vdisplay;
 }
 
@@ -370,8 +389,9 @@ void KMSDisplayConsumer::renderFrame(const IFrame &frame) {
   }
   if (pcm_levels && !out.have_pcm)
     std::fprintf(stderr,
-        "\nKMS experimental PCM levels: blank=0, data-zero=36, data-one=146, "
-        "white=255 (RGB codes; analogue voltages unverified).\n");
+        "\nKMS experimental PCM levels: blank=0, data-zero=%u, data-one=%u, "
+        "white=%u (RGB codes; analogue voltages unverified).\n",
+        unsigned(pcm_low), unsigned(pcm_high), unsigned(pcm_white));
   if (display_stats && !out.have_pcm)
     std::fprintf(stderr, "\nKMS geometry: source=%dx%d, draw=%dx%lld+%d+0, screen=%dx%d\n",
         frame.width(), frame.heigth(), dest_width, static_cast<long long>(dest_height),

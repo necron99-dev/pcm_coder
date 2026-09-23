@@ -118,6 +118,9 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
   newOption(app, "--heigth_mod", options.Rpi_heigth_mod, "RPI heigth modifier.")
       ->needs(rpi_mode);
 #ifndef RPI_LEGACY
+  newFlag(app, "--vec-mono525", options.Rpi_vec_mono525,
+          "Apply native VEC MONO525 with sync_adj=7 after KMS setup (requires /dev/mem).")
+      ->needs(rpi_mode);
   newFlag(app, "--wait-for-enter", options.Rpi_wait_for_enter,
           "Output PCM silence until Enter is pressed, then start the audio file.")
       ->needs(rpi_mode);

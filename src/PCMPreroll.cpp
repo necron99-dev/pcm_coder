@@ -21,7 +21,7 @@ bool playSilenceUntilEnter(IConsumer<SamplesPack> &encoder, bool pal,
     encoder.Ressive(silence);
     if (stopping()) return false;
     if (!prompted) {
-      std::cerr << "\nPCM silence is running. Apply TweakVec if needed, then press Enter "
+      std::cerr << "\nPCM silence is running. Press Enter "
                    "to start the audio file (Ctrl+C to quit).\n";
       prompted = true;
     }
