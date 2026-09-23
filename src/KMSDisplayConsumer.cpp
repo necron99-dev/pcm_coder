@@ -28,7 +28,7 @@ void checkDRM(int result, const char *operation) {
 // IEC 60841 Figure 3: data low/high are 0.1/0.4 V above blanking,
 // while the white reference is 0.7 V above blanking. These RGB values
 // assume a linear full-range DAC transfer; actual Pi voltages are unmeasured.
-constexpr uint8_t pcm_low = 36;   // round(255 * 0.1 / 0.7)
+constexpr uint8_t pcm_low = 30;   // Experimental reduction from nominal RGB 36.
 constexpr uint8_t pcm_high = 146; // round(255 * 0.4 / 0.7)
 constexpr uint8_t pcm_white = 255;
 
