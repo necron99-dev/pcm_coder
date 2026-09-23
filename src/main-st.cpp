@@ -25,6 +25,7 @@
 #include "RPIFbDisplayConsumer.h"
 #else
 #include "KMSDisplayConsumer.h"
+#include "PCMPreroll.h"
 #endif
 #endif
 
@@ -146,10 +147,10 @@ static int play(Options &options) {
           ? audioprodusser.NextStage(splitter).NextStage(bitWidthConverter)
           : audioprodusser.NextStage(bitWidthConverter);
 
+  auto &lineGenerator = preparedSamples.NextStage(
+      new LineGeneratorStage{options.width14, options.parity, options.generateQ()});
   auto &stage =
-      preparedSamples
-          .NextStage(new LineGeneratorStage{options.width14, options.parity,
-                                            options.generateQ()})
+      lineGenerator
           .NextStage(new PCMFrameStage(options.width14, options.parity,
                                        options.generateQ(),
                                        options.copyProtection, options.pal,
@@ -208,6 +209,15 @@ static int play(Options &options) {
         .NextConsumer(new FFmpegVideoCoderConsumer(
             options.OutputFile, options.codec, options.bitrate, options.pal));
   }
+
+#if defined(RPI) && !defined(RPI_LEGACY)
+  if (options.Rpi_wait_for_enter) {
+    if (!playSilenceUntilEnter(lineGenerator, options.pal,
+                              []() { return terminate_flag; }))
+      return 0;
+    std::cerr << "Starting audio file.\n";
+  }
+#endif
 
   auto duration = std::chrono::duration_cast<std::chrono::microseconds>(
                       audioprodusser.duration())

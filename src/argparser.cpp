@@ -118,6 +118,9 @@ static void configureArgumentParcer(CLI::App &app, Options &options) {
   newOption(app, "--heigth_mod", options.Rpi_heigth_mod, "RPI heigth modifier.")
       ->needs(rpi_mode);
 #ifndef RPI_LEGACY
+  newFlag(app, "--wait-for-enter", options.Rpi_wait_for_enter,
+          "Output PCM silence until Enter is pressed, then start the audio file.")
+      ->needs(rpi_mode);
   newFlag(app, "--kms-pcm-levels", options.Rpi_pcm_levels,
           "Experimental PCM video levels: raise data-zero above blanking; retain geometry.")
       ->needs(rpi_mode);

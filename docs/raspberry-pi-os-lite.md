@@ -330,6 +330,39 @@ An SSH session may lack active-seat/DRM-master access even with these groups;
 try the local console first. SDL requires [DRM master access](https://wiki.libsdl.org/SDL2/SDL_HINT_KMSDRM_REQUIRE_DRM_MASTER)
 to render through KMSDRM. Disabling that requirement does not enable rendering.
 
+## Start with PCM silence before playing the file
+
+Add `--wait-for-enter` to KMS playback to send continuous PCM-encoded silence
+before starting the input file. Once the silence prompt appears, apply TweakVec
+from another terminal, allow the decoder to lock, and press Enter in the
+`pcm_coder` terminal. Ctrl+C exits while waiting; closing standard input without
+Enter exits with an error rather than starting the file.
+
+For the current level-comparison experiment:
+
+```sh
+sudo chrt -f 50 taskset -c 3 \
+  env SDL_VIDEODRIVER=kmsdrm SDL_KMSDRM_DEVICE_INDEX=0 \
+  ./build/src/pcm_coder -R --kms-pcm-levels --wait-for-enter \
+  --left_offset 2 --right_offset 8 \
+  --crop-top 18 --crop-bot 43 \
+  ~/music/holy.wav
+```
+
+After the silence prompt, in another terminal:
+
+```sh
+sudo python3 ~/tweakvec/tweakvec.py --preset MONO525 --sync-adj 7
+```
+
+The lead-in uses zero audio samples without dither, with the selected PCM
+format, parity, levels and geometry. Enter starts the file from its beginning
+through the same encoder and display; the interleaver and KMS mode are not
+restarted. Normal pipeline latency still applies. The file's dither setting
+is preserved, and its progress starts when file playback starts. Without the
+option, playback starts immediately as before. This startup control does not
+change the signal-level experiment or establish VHS recording reliability.
+
 ## Experimental PCM video levels
 
 The normal renderer uses RGB codes 0/150 for PCM zero/one, with a 255 white

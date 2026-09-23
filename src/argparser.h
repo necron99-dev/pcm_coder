@@ -39,6 +39,7 @@ struct Options {
   bool Rpi_display_stats = false;
   bool Rpi_full_frame = false;
   bool Rpi_pcm_levels = false;
+  bool Rpi_wait_for_enter = false;
 #endif
 
   std::string formatsStr() const { return pal ? "PAL" : "NTSC"; }

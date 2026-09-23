@@ -38,6 +38,8 @@ container; passing file tests does not establish hardware decoding quality.
 - Save video using FFmpeg, with a selectable codec and bitrate.
 - Preview video and sound using SDL2 and PortAudio.
 - Play composite video from a Pi's local text console using SDL2/KMSDRM.
+- Start KMS with PCM silence and press Enter to begin the audio file using
+  [`--wait-for-enter`](docs/raspberry-pi-os-lite.md#start-with-pcm-silence-before-playing-the-file).
 - Crop scan lines from the top and bottom of the image.
 
 ## Build on Raspberry Pi OS Lite or Debian Linux
